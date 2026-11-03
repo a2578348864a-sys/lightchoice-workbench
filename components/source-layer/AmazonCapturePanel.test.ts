@@ -15,14 +15,27 @@ describe("AmazonCapturePanel 出口预检与环境可控性契约测试", () => 
     expect(source).toContain("<RefreshCw");
   });
 
-  it("打开弹窗即自动检测出口并读取真实 Session Readiness", () => {
+  it("打开弹窗只检查出口，不自动启动浏览器；重新检查是唯一会话核验入口", () => {
     expect(source).toContain('"/api/source-layer/amazon-session-readiness"');
     expect(source).toContain("if (nextPreflight.status === \"US_READY\")");
-    expect(source).toContain("void checkPreflight(true)");
+    expect(source).toContain("void checkPreflight(false)");
     expect(source).toContain("onClick={() => void checkPreflight(true)}");
     expect(source).toContain('data-testid="amazon-session-readiness"');
     expect(source).toContain("Chrome/Edge 已启动");
     expect(source).toContain("sessionReadiness.errorCode ?? sessionReadiness.status");
+  });
+
+  it("提供 Amazon 专用浏览器启动入口，且不把打开窗口当作已登录", () => {
+    expect(source).toContain("/api/source-layer/capture-environment/launch-amazon-browser");
+    expect(source).toContain("启动 Amazon 专用浏览器");
+    expect(source).toContain('data-testid="launch-amazon-browser"');
+    expect(source).toContain("专用浏览器已打开");
+    expect(source).toContain("正在启动…");
+    expect(source).toContain("重试启动");
+    expect(source).toContain('data-testid="amazon-browser-launch-notice"');
+    expect(source).toContain("登录完成后请关闭窗口，再点击重新检查");
+    expect(source).toContain("browserLaunch.status === \"FAILED\"");
+    expect(source).not.toContain("浏览器已打开：Amazon 已登录");
   });
 
   it("区分网络/会话/授权状态，并在会话未通过时禁止提交", () => {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState, type CSSProperties } from "react";
-import { AlertCircle, ArrowRight, CheckCircle2, ChevronDown, Database, FileCheck2, Fingerprint, Globe2, Layers, Loader2, LockKeyhole, PackageCheck, RefreshCw, Search, ShieldCheck } from "lucide-react";
+import { AlertCircle, ArrowRight, CheckCircle2, ChevronDown, Database, FileCheck2, Fingerprint, Globe2, Layers, Loader2, LockKeyhole, PackageCheck, Play, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import styles from "./AmazonCapturePanel.module.css";
 
 import { buildAccessHeaders } from "@/lib/client/accessToken";
@@ -89,6 +89,12 @@ type AmazonSessionReadinessState = {
   failureKind?: string | null;
 };
 
+type AmazonBrowserLaunchState = {
+  status: "IDLE" | "STARTING" | "OPENED" | "ALREADY_RUNNING" | "FAILED";
+  errorCode: string | null;
+  message: string | null;
+};
+
 type CaptureResponse = {
   ok?: boolean;
   data?: {
@@ -157,6 +163,71 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
     language: null,
   });
 
+  const [browserLaunch, setBrowserLaunch] = useState<AmazonBrowserLaunchState>({
+    status: "IDLE",
+    errorCode: null,
+    message: null,
+  });
+
+  const launchAmazonBrowser = useCallback(async () => {
+    setBrowserLaunch({ status: "STARTING", errorCode: null, message: null });
+    // 启动窗口会占用同一个 Profile；先撤销旧的“已通过”，防止用户绕过重新检查直接采集。
+    setSessionReadiness((prev) => ({
+      ...prev,
+      loading: false,
+      status: "SESSION_NOT_READY",
+      sessionReady: false,
+      browserLaunched: false,
+      errorCode: "PROFILE_IN_USE",
+      message: "专用浏览器窗口正在占用 Amazon Profile；请登录后关闭窗口，再点击重新检查。",
+    }));
+    try {
+      const response = await fetch("/api/source-layer/capture-environment/launch-amazon-browser", {
+        method: "POST",
+        cache: "no-store",
+        headers: buildAccessHeaders(),
+      });
+      const payload = await response.json().catch(() => null) as {
+        ok?: boolean;
+        data?: { status?: "started" | "already_running"; pid?: number | null };
+        error?: { code?: string; message?: string };
+      } | null;
+      if (!response.ok || payload?.ok !== true) {
+        const code = payload?.error?.code ?? "LAUNCH_FAILED";
+        const message = payload?.error?.message ?? `启动请求失败（${response.status}）。`;
+        setBrowserLaunch({ status: "FAILED", errorCode: code, message });
+        setSessionReadiness((prev) => ({
+          ...prev,
+          loading: false,
+          status: "SESSION_NOT_READY",
+          sessionReady: false,
+          errorCode: code,
+          message,
+        }));
+        return;
+      }
+      const reused = payload.data?.status === "already_running";
+      setBrowserLaunch({
+        status: reused ? "ALREADY_RUNNING" : "OPENED",
+        errorCode: null,
+        message: reused
+          ? "已检测到现有 Amazon 专用浏览器窗口，复用窗口，未重复启动。请登录后关闭窗口，再点击重新检查。"
+          : "Amazon 专用浏览器已打开。请在窗口内完成登录，登录完成后关闭窗口，再点击重新检查。",
+      });
+    } catch {
+      const message = "启动请求未完成（网络中断）；未确认浏览器已打开。";
+      setBrowserLaunch({ status: "FAILED", errorCode: "LAUNCH_FAILED", message });
+      setSessionReadiness((prev) => ({
+        ...prev,
+        loading: false,
+        status: "SESSION_NOT_READY",
+        sessionReady: false,
+        errorCode: "LAUNCH_FAILED",
+        message,
+      }));
+    }
+  }, []);
+
   const checkAmazonSessionReadiness = useCallback(async () => {
     setSessionReadiness((prev) => ({ ...prev, loading: true, status: "CHECKING" }));
     try {
@@ -170,6 +241,16 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
       };
       if (response.ok && payload.ok && payload.data) {
         setSessionReadiness({ ...payload.data, loading: false });
+        if (payload.data.errorCode === "PROFILE_IN_USE" && payload.data.message?.includes("专用浏览器")) {
+          setBrowserLaunch({
+            status: "OPENED",
+            errorCode: "PROFILE_IN_USE",
+            message: "检测到 Amazon 专用浏览器窗口仍在运行；请关闭窗口后再点击重新检查。",
+          });
+        } else {
+          // 只要会话检查能进入 Playwright 启动，说明专用窗口已关闭；恢复启动按钮初始态。
+          setBrowserLaunch({ status: "IDLE", errorCode: null, message: null });
+        }
       } else {
         setSessionReadiness({
           loading: false,
@@ -303,8 +384,8 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
   }, [checkAmazonSessionReadiness]);
 
   useEffect(() => {
-    // 打开采集弹窗即执行真实预检查（出口 + Amazon 会话）；未通过前不允许提交。
-    void checkPreflight(true);
+    // 打开弹窗只检查网络出口；不自动启动浏览器。会话由用户显式「重新检查」核验。
+    void checkPreflight(false);
   }, [checkPreflight]);
 
   useEffect(() => {
@@ -410,13 +491,16 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
   const canSubmit = hasInput && preflight.status === "US_READY" && !preflight.loading
     && !sessionReadiness.loading && sessionReadiness.sessionReady && (mode !== "search" || !customLimitError);
   const networkReady = !preflight.loading && preflight.status === "US_READY";
-  const sessionLabel = sessionReadiness.loading || sessionReadiness.status === "CHECKING" ? "核验中"
+  const launchStarting = browserLaunch.status === "STARTING";
+  const launchActive = browserLaunch.status === "OPENED" || browserLaunch.status === "ALREADY_RUNNING";
+  const sessionLabel = launchActive ? "等待登录"
+    : sessionReadiness.loading || sessionReadiness.status === "CHECKING" ? "核验中"
     : sessionReadiness.sessionReady
       ? sessionReadiness.signedIn === true ? "已通过" : "已通过 · 登录待确认"
       : sessionReadiness.status === "IDLE" ? "待核验"
         : sessionReadiness.errorCode === "LOGIN_REQUIRED" || sessionReadiness.errorCode === "LOGIN_WALL" ? "需登录"
           : sessionReadiness.errorCode === "CAPTCHA_DETECTED" || sessionReadiness.errorCode === "HUMAN_REQUIRED" || sessionReadiness.errorCode === "AUTOMATION_BLOCKED" ? "需人工确认"
-            : sessionReadiness.errorCode === "PROFILE_IN_USE" || sessionReadiness.errorCode === "PROFILE_LOCK_UNAVAILABLE" ? "浏览器占用"
+            : sessionReadiness.errorCode === "PROFILE_IN_USE" || sessionReadiness.errorCode === "PROFILE_LOCK_UNAVAILABLE" ? "Profile 占用"
               : sessionReadiness.status === "ACQUISITION_DISABLED" ? "未开放"
                 : sessionReadiness.errorCode === "LOGIN_STATE_UNKNOWN" ? "登录待确认"
                   : sessionReadiness.status === "PREFLIGHT_BLOCKED" ? "网络未通过"
@@ -426,6 +510,13 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
       : "已开放";
   const authorizationTone = authorizationLabel === "已开放" ? "ok" : authorizationLabel === "未开放" ? "warn" : "pending";
   const networkLabel = preflight.loading ? "检查中" : networkReady ? "美国出口" : preflight.status === "NON_US_EXIT" ? "非美国出口" : preflight.status === "PROXY_INVALID" ? "配置异常" : "尚未确认";
+  const launchLabel = launchStarting
+    ? "正在启动…"
+    : launchActive
+      ? "专用浏览器已打开"
+      : browserLaunch.status === "FAILED"
+        ? "重试启动"
+        : "启动 Amazon 专用浏览器";
   const blockingReason = preflight.loading ? "正在检查网络出口…"
     : !networkReady ? preflight.status === "NON_US_EXIT" ? "当前出口非美国，采集已禁用。请切换美国节点后重新检查。" : preflight.status === "PROXY_INVALID" ? "代理配置异常，请修复后重新检查。" : "尚未确认美国出口，请重新检查网络。"
     : sessionReadiness.loading || sessionReadiness.status === "CHECKING" ? "正在核验 Amazon 会话…"
@@ -488,13 +579,41 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
               </div>}
             </fieldset>}
             <section className={styles.readiness} aria-label="采集条件">
-              <div className={styles.sectionHeading}><span className={styles.label}>采集前检查</span><button type="button" onClick={() => void checkPreflight(true)} disabled={busy || preflight.loading || sessionReadiness.loading} data-testid="capture-recheck"><RefreshCw size={14} className={preflight.loading || sessionReadiness.loading ? styles.spin : undefined} aria-hidden="true" />重新检查</button></div>
+              <div className={styles.sectionHeading}>
+                <span className={styles.label}>采集前检查</span>
+                <div className={styles.readinessActions}>
+                  <button
+                    type="button"
+                    className={styles.launchButton}
+                    onClick={() => void launchAmazonBrowser()}
+                    disabled={busy || launchStarting}
+                    data-testid="launch-amazon-browser"
+                  >
+                    {launchStarting
+                      ? <Loader2 size={14} className={styles.spin} aria-hidden="true" />
+                      : <Play size={14} aria-hidden="true" />}
+                    {launchLabel}
+                  </button>
+                  <button type="button" onClick={() => void checkPreflight(true)} disabled={busy || preflight.loading || sessionReadiness.loading} data-testid="capture-recheck"><RefreshCw size={14} className={preflight.loading || sessionReadiness.loading ? styles.spin : undefined} aria-hidden="true" />重新检查</button>
+                </div>
+              </div>
               <div className={styles.conditions}>
                 <div data-tone={networkReady ? "ok" : preflight.loading ? "pending" : "warn"}><Globe2 size={17} aria-hidden="true" /><span>网络出口</span><b data-testid="capture-network-status">{networkLabel}</b></div>
                 <div data-tone={sessionReadiness.sessionReady ? (sessionReadiness.signedIn === true ? "ok" : "pending") : sessionReadiness.status === "IDLE" || sessionReadiness.loading ? "pending" : "warn"} data-testid="amazon-session-readiness"><ShieldCheck size={17} aria-hidden="true" /><span>Amazon 会话</span><b>{sessionLabel}</b></div>
                 <div data-tone={authorizationTone} data-testid="capture-authorization-status"><LockKeyhole size={17} aria-hidden="true" /><span>采集授权</span><b>{authorizationLabel}</b></div>
               </div>
-              <p className={styles.readinessNote}>重新检查可能打开专用浏览器，不会自动开始采集。</p>
+              {browserLaunch.message && (
+                <p
+                  className={styles.launchNotice}
+                  data-tone={browserLaunch.status === "FAILED" ? "error" : "info"}
+                  role={browserLaunch.status === "FAILED" ? "alert" : "status"}
+                  data-testid="amazon-browser-launch-notice"
+                >
+                  {browserLaunch.message}
+                  {browserLaunch.errorCode ? `（${browserLaunch.errorCode}）` : ""}
+                </p>
+              )}
+              <p className={styles.readinessNote}>启动按钮只打开专用浏览器窗口，不会自动开始采集。登录完成后请关闭窗口，再点击重新检查。</p>
             </section>
           </div>
           {mode === "search" && <aside className={styles.destination} aria-label="采集成果说明">

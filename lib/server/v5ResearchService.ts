@@ -1084,7 +1084,13 @@ export function researchRootStaleState(root: Record<string, unknown>, state: V5R
   return { reportStale, decisionStale };
 }
 
-async function researchReadStaleState(context: AccessContext, taskId: string, root: Record<string, unknown>, state: V5ResearchState) {
+async function researchReadStaleState(
+  context: AccessContext,
+  taskId: string,
+  root: Record<string, unknown>,
+  state: V5ResearchState,
+  precomputedBoundary?: Awaited<ReturnType<typeof loadCanonicalResearchBoundary>>,
+) {
   const pure = researchRootStaleState(root, state);
   // v5 报告自身 hash 比对只在 v5 是当前权威时有意义；
   // 权威是 v1 时 state.reportHash 已被换成 v1 的 hash，再比就是拿两份不同报告互相对照。
@@ -1097,7 +1103,7 @@ async function researchReadStaleState(context: AccessContext, taskId: string, ro
   const authority = effectiveReportBinding(root, state);
   const authoritySource = authority.resolution.status === "current" ? authority.resolution.source : "none";
   if (authoritySource === "v5" && state.factHash && state.evidenceHash) {
-    const boundary = await loadCanonicalResearchBoundary({ context, taskId, recordDiagnostic: false });
+    const boundary = precomputedBoundary ?? await loadCanonicalResearchBoundary({ context, taskId, recordDiagnostic: false });
     // factHash 语义（方案 A 隔离修复）：对稳定业务事实子集计算（剔除动态派生 amazonDetailHistory，
     // 其 injectedNow 每次注入当前时刻导致完整对象哈希永不稳定——见 research/stableFactHash.ts）。
     reportStale ||= !boundary.ok || stableFactHash(boundary.bundle.productFact) !== state.factHash
@@ -1107,7 +1113,7 @@ async function researchReadStaleState(context: AccessContext, taskId: string, ro
   // 没有绑定的历史 v1 报告无法判定时效，读侧以 bindingStatus=unbound 如实标注，不假装有效。
   const v1Bindings = authoritySource === "v1" && isRecord(root.researchReportBindingHashes) ? root.researchReportBindingHashes : null;
   if (v1Bindings) {
-    const boundary = await loadCanonicalResearchBoundary({ context, taskId, recordDiagnostic: false });
+    const boundary = precomputedBoundary ?? await loadCanonicalResearchBoundary({ context, taskId, recordDiagnostic: false });
     if (!boundary.ok) reportStale = true;
     else {
       if (typeof v1Bindings.factHash === "string" && v1Bindings.factHash !== stableFactHash(boundary.bundle.productFact)) reportStale = true;
@@ -1334,7 +1340,39 @@ function taskDetail(
   };
 }
 
-export async function listResearch(input: { context: AccessContext; view?: string; include?: string; limit?: number }) {
+/**
+ * 只读列表的有界并发：每行需要独立读取证据绑定，串行会把墙钟时间累加为 N 倍。
+ * 并发上限固定为 4，避免对 SQLite / EvidenceStore 形成无界并发读。
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+export async function listResearch(input: {
+  context: AccessContext;
+  view?: string;
+  include?: string;
+  limit?: number;
+  /**
+   * 轻量摘要模式：供工作台导航/首页摘要读取计数与目标，不消费研报审计与证据时效。
+   * 普通列表与详情保持完整审计；轻量模式把未计算的审计/时效字段显式返回 null，不伪装成 false。
+   */
+  light?: boolean;
+}) {
   requireOwnerContext(input.context);
   const allowed = [
     "all",
@@ -1423,14 +1461,27 @@ export async function listResearch(input: { context: AccessContext; view?: strin
     stageCounts.all += pendingCandidateCount;
   }
 
-  for (const task of tasks) {
+  // 任务对应候选一次性读取，避免逐任务 findUnique（列表最多 100 条）。
+  const taskCandidateIds = tasks.flatMap((task) => {
+    const root = parseJsonRecord(task.resultJson);
+    return isRecord(root.candidateToTask) && typeof root.candidateToTask.candidateId === "string"
+      ? [root.candidateToTask.candidateId]
+      : [];
+  });
+  const candidatesForTasks = taskCandidateIds.length
+    ? await prisma.opportunityCandidate.findMany({
+        where: { id: { in: taskCandidateIds } },
+        select: { id: true, name: true, sourceMetaJson: true, link: true },
+      })
+    : [];
+  const candidateById = new Map(candidatesForTasks.map((candidate) => [candidate.id, candidate]));
+
+  const taskRows = await mapWithConcurrency(tasks, 4, async (task) => {
     const root = parseJsonRecord(task.resultJson);
     const candidateId = isRecord(root.candidateToTask) && typeof root.candidateToTask.candidateId === "string" ? root.candidateToTask.candidateId : null;
-    const candidate = candidateId ? await prisma.opportunityCandidate.findUnique({ where: { id: candidateId }, select: { id: true, name: true, sourceMetaJson: true, link: true } }) : null;
+    const candidate = candidateId ? candidateById.get(candidateId) ?? null : null;
     const state = taskState(task, candidate ?? undefined);
     const meta = parseJsonRecord(candidate?.sourceMetaJson);
-    const boundary = await loadCanonicalResearchBoundary({ context: input.context, taskId: task.id });
-    const resolvedFacts = resolveProductFacts(root, meta, boundary.ok ? boundary.bundle.productFact : null);
     const viewState = task.archivedAt ? "archived" : state.myChoice?.scope === "FINAL" ? String(state.myChoice.choice).toLowerCase() : state.report ? "needs_choice" : "in_progress";
 
     const businessStage = resolveBusinessStage({
@@ -1444,6 +1495,14 @@ export async function listResearch(input: { context: AccessContext; view?: strin
       deepseekAvailable: Boolean(state.report),
       hasFormalReport: Boolean(state.report && state.reportHash),
     });
+
+    // 轻量摘要模式只服务首页「待我决策」卡片身份（最多 5 条），其余行不加载 ProductFact 绑定；
+    // 普通列表仍为每一行加载完整边界与审计。
+    const needsIdentityFact = !input.light || businessStage === "needs_decision";
+    const boundary = needsIdentityFact
+      ? await loadCanonicalResearchBoundary({ context: input.context, taskId: task.id })
+      : null;
+    const resolvedFacts = resolveProductFacts(root, meta, boundary?.ok ? boundary.bundle.productFact : null);
 
     /**
      * E-1B：研究任务的真实进度（派生字段，不写库）。
@@ -1460,9 +1519,10 @@ export async function listResearch(input: { context: AccessContext; view?: strin
 
     const findingOfRow = researchFindingOf(root, state, researchState);
     // 列表与详情共用同一份研报强度审查：待决策不能掩盖报告被暂停采信。
-    const claimAudit = await auditForState({ root, state, boundary });
+    // 轻量摘要不消费该审查，返回 null 表示「本模式未计算」，不伪装成通过。
+    const claimAudit = !input.light && boundary ? await auditForState({ root, state, boundary }) : null;
 
-    allRows.push({
+    return {
       taskId: task.id,
       candidateId: candidateId ?? state.candidateId,
       asin: state.asin,
@@ -1483,28 +1543,33 @@ export async function listResearch(input: { context: AccessContext; view?: strin
       researchRevision: state.researchRevision ?? null,
       myChoice: choiceProjection(state.myChoice),
       systemSuggestion: systemSuggestion(state),
-      stale: (await researchReadStaleState(input.context, task.id, root, state)).stale,
+      stale: input.light
+        ? null
+        : (await researchReadStaleState(input.context, task.id, root, state, boundary ?? undefined)).stale,
       reportAuditVerdict: claimAudit?.verdict ?? null,
-      reportConsumptionBlocked: Boolean(claimAudit && claimConsumptionBlockReason(claimAudit)),
+      reportConsumptionBlocked: input.light ? null : Boolean(claimAudit && claimConsumptionBlockReason(claimAudit)),
       reportConsumptionNotice: claimAudit ? claimConsumptionNotice(claimAudit) : null,
       hasProductBrief: isRecord(root.productBrief),
       archivedAt: task.archivedAt?.toISOString() ?? null,
       updatedAt: task.updatedAt.toISOString(),
       resourceVersion: resourceVersion(task.updatedAt),
-    });
-  }
+    };
+  });
+  allRows.push(...taskRows);
 
   // Include pending candidates if view is all or ready
   if (targetStage === "all" || targetStage === "ready") {
     const pending = await prisma.opportunityCandidate.findMany({ where: { convertedTaskId: null, archivedAt: null }, orderBy: { updatedAt: "desc" }, take: 100 });
-    for (const candidate of pending) {
+    const pendingRows = await mapWithConcurrency(pending, 4, async (candidate) => {
       const meta = parseJsonRecord(candidate.sourceMetaJson);
       let verifiedFact: ProductFact | null = null;
-      try { verifiedFact = await readResearchCandidateProductFact(input.context, candidate.sourceMetaJson); } catch { /* Invalid evidence renders unknown. */ }
+      if (!input.light) {
+        try { verifiedFact = await readResearchCandidateProductFact(input.context, candidate.sourceMetaJson); } catch { /* Invalid evidence renders unknown. */ }
+      }
       const resolvedFacts = resolveProductFacts({}, meta, verifiedFact);
       const businessStage = "ready";
 
-      allRows.push({
+      return {
         taskId: null,
         candidateId: candidate.id,
         asin: typeof meta.asin === "string" ? meta.asin : "",
@@ -1528,8 +1593,9 @@ export async function listResearch(input: { context: AccessContext; view?: strin
         stale: false,
         archivedAt: null,
         updatedAt: candidate.updatedAt.toISOString(),
-      });
-    }
+      };
+    });
+    allRows.push(...pendingRows);
   }
 
   // Filter rows based on targetStage

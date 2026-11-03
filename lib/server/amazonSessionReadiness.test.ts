@@ -18,6 +18,7 @@ import type { AccessContext } from "@/lib/server/accessPassword";
 import { checkAmazonSessionReadiness } from "./amazonSessionReadiness";
 
 const ownerContext = { mode: "owner", userId: "owner-1", token: "test-token" } as unknown as AccessContext;
+const profileUnlocked = async () => ({ appLease: false, browserLock: false, browserProcess: false });
 beforeEach(() => vi.stubEnv("LOCAL_ACQUISITION_ENABLED", "true"));
 afterEach(() => vi.unstubAllEnvs());
 
@@ -96,7 +97,7 @@ describe("checkAmazonSessionReadiness", () => {
     const openSession = vi.fn();
     const result = await checkAmazonSessionReadiness({
       context: ownerContext,
-      deps: { checkPreflight: async () => nonUsPreflight, openSession },
+      deps: { checkPreflight: async () => nonUsPreflight, openSession, inspectProfileOccupancy: profileUnlocked },
     });
 
     expect(result).toMatchObject({
@@ -119,7 +120,7 @@ describe("checkAmazonSessionReadiness", () => {
     const session = sessionOf("New York 10001");
     const result = await checkAmazonSessionReadiness({
       context: ownerContext,
-      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession },
+      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession, inspectProfileOccupancy: profileUnlocked },
     });
 
     expect(result).toMatchObject({
@@ -156,7 +157,7 @@ describe("checkAmazonSessionReadiness", () => {
     session.close.mockRejectedValue(Object.assign(new Error("close failed"), { code: "PROFILE_BROWSER_CLOSE_FAILED" }));
     const result = await checkAmazonSessionReadiness({
       context: ownerContext,
-      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession },
+      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession, inspectProfileOccupancy: profileUnlocked },
     });
 
     expect(result).toMatchObject({
@@ -174,7 +175,7 @@ describe("checkAmazonSessionReadiness", () => {
   it("US_READY + 第一次 delivery 非 US：一次校准后 SESSION_READY", async () => {
     const session = sessionOf("Tokyo Japan");
     const result = await checkAmazonSessionReadiness({
-      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession },
+      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession, inspectProfileOccupancy: profileUnlocked },
     });
 
     expect(result).toMatchObject({
@@ -194,7 +195,7 @@ describe("checkAmazonSessionReadiness", () => {
     session.goto.mockRejectedValue(timeoutError());
     const result = await checkAmazonSessionReadiness({
       context: ownerContext,
-      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession },
+      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession, inspectProfileOccupancy: profileUnlocked },
     });
 
     expect(result).toMatchObject({
@@ -221,6 +222,7 @@ describe("checkAmazonSessionReadiness", () => {
       deps: {
         checkPreflight: async () => usReadyPreflight,
         openSession: async () => ({ ok: false as const, errorCode: "PLAYWRIGHT_RUNTIME_MISSING", errorMessage: "当前项目未安装 Playwright runtime。", errorName: null, errorDetail: null }),
+        inspectProfileOccupancy: profileUnlocked,
       },
     });
 
@@ -234,10 +236,61 @@ describe("checkAmazonSessionReadiness", () => {
     expect(mocks.captureThroughGateway).not.toHaveBeenCalled();
   });
 
+  it("人工启动的专用浏览器仍占用 Profile：不尝试第二个 Playwright，返回 PROFILE_IN_USE", async () => {
+    const openSession = vi.fn();
+    const result = await checkAmazonSessionReadiness({
+      context: ownerContext,
+      deps: {
+        checkPreflight: async () => usReadyPreflight,
+        openSession,
+        inspectProfileOccupancy: async () => ({ appLease: false, browserLock: false, browserProcess: true }),
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: "BROWSER_UNAVAILABLE",
+      sessionReady: false,
+      browserLaunched: false,
+      failureStage: "BROWSER_LAUNCH",
+      errorCode: "PROFILE_IN_USE",
+      message: "Amazon 专用浏览器仍在运行，请先关闭浏览器窗口，再重新检查会话。",
+    });
+    expect(openSession).not.toHaveBeenCalled();
+    expect(mocks.recordDiagnosticEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("signedIn=null：环境已通过但登录状态未确认，不得报告 SESSION_READY", async () => {
+    const page = {
+      goto: async () => undefined,
+      url: () => "https://www.amazon.com/",
+      title: async () => "Amazon.com. Spend less. Smile more.",
+      evaluate: async <T>() => ({ delivery: "New York 10001", language: "en-US", title: "Amazon.com", marker: true, signedIn: null }) as T,
+      locator: () => ({ click: async () => undefined, fill: async () => undefined, count: async () => 0 }),
+    };
+    const close = vi.fn(async () => undefined);
+    const result = await checkAmazonSessionReadiness({
+      context: ownerContext,
+      deps: {
+        checkPreflight: async () => usReadyPreflight,
+        openSession: async () => ({ ok: true as const, page, close }),
+        inspectProfileOccupancy: profileUnlocked,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: "SESSION_NOT_READY",
+      sessionReady: false,
+      signedIn: null,
+      errorCode: "LOGIN_STATE_UNKNOWN",
+    });
+  });
+
   it("未传 context 时不写审计事件，但结果仍然完整", async () => {
     const session = sessionOf("New York 10001");
     const result = await checkAmazonSessionReadiness({
-      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession },
+      deps: { checkPreflight: async () => usReadyPreflight, openSession: session.openSession, inspectProfileOccupancy: profileUnlocked },
     });
     expect(result.status).toBe("SESSION_READY");
     expect(mocks.recordDiagnosticEvent).not.toHaveBeenCalled();
@@ -262,6 +315,7 @@ describe("checkAmazonSessionReadiness", () => {
             browserEnv = proxyEnv;
             return session.openSession();
           },
+          inspectProfileOccupancy: profileUnlocked,
         },
       });
 

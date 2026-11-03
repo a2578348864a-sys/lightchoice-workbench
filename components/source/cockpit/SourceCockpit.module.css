@@ -360,6 +360,30 @@
 .statusWarn { background: #fdf3e2; color: #8a5f13; border: 1px solid #ecd7b2; }
 .statusEmpty { background: #f2f5f4; color: #6b8177; border: 1px solid #e2ebe6; }
 
+.rowActions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+}
+
+.rowMenuButton {
+  display: inline-grid; place-items: center;
+  width: 32px; height: 32px; padding: 0; border-radius: 10px;
+  border: 1px solid var(--sc-line-strong); background: #fff;
+  color: #21503f; white-space: nowrap;
+  transition: background 150ms var(--sc-ease), border-color 150ms var(--sc-ease), color 150ms var(--sc-ease);
+}
+.rowMenuButton:hover,
+.rowMenuButton[aria-expanded="true"] {
+  background: var(--sc-mint-soft); border-color: #a9d3bd; color: #0f5b45;
+}
+.rowMenuButton:disabled { opacity: 0.5; cursor: not-allowed; }
+.rowMenuButton:focus-visible { outline: 2px solid #087f68; outline-offset: 2px; }
+
+.rowActionsMenu { min-width: 196px; }
+.rowActionsMenu button { display: flex; align-items: center; gap: 8px; }
+.rowActionsMenu button:disabled { opacity: 0.45; cursor: not-allowed; }
+.rowActionsMenu .rowMenuDanger { color: #b42318; }
+.rowActionsMenu .rowMenuDanger:hover { background: #fdf2f1; }
+
 .rowAction {
   display: inline-flex; align-items: center; gap: 5px;
   height: 32px; padding: 0 12px; border-radius: 10px;

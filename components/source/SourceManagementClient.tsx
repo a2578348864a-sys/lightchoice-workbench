@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
@@ -23,6 +23,7 @@ import {
   Layers,
   Loader2,
   MessagesSquare,
+  MoreHorizontal,
   Plus,
   RefreshCw,
   Search,
@@ -1974,13 +1975,26 @@ async function handleBatchDetailEnrichmentConfirm(batch: SourceBatchSummary) {
                 onSelect: () => setDetailHistoryOpen((prev) => !prev),
               },
               {
+                key: "archive-restore-batch",
+                label: batch.archivedAt ? "恢复批次" : "归档批次",
+                testId: "batch-archive-restore-button",
+                icon: batch.archivedAt
+                  ? <RefreshCw size={13} aria-hidden="true" />
+                  : <Archive size={13} aria-hidden="true" />,
+                separatorBefore: true,
+                disabled: batchActionBusy,
+                disabledReason: "批次操作进行中",
+                onSelect: () => {
+                  if (batch.archivedAt) void handleRestoreBatch(batch);
+                  else void handleArchiveBatch(batch);
+                },
+              },
+              {
                 key: "delete-batch",
                 label: "删除批次",
                 testId: "batch-delete-button",
                 icon: <Trash2 size={13} aria-hidden="true" />,
                 tone: "danger",
-                separatorBefore: true,
-                hidden: !isEmptyBatch,
                 disabled: batchActionBusy,
                 disabledReason: "批次操作进行中",
                 onSelect: () => handleDeleteBatch(batch),
@@ -2629,6 +2643,31 @@ async function handleBatchDetailEnrichmentConfirm(batch: SourceBatchSummary) {
           <span className={sourceStyles.panelMeta}>共 {batches.length} 个批次</span>
         </div>
 
+        {batchNotice ? (
+          <div
+            role={batchNotice.tone === "error" ? "alert" : "status"}
+            data-testid="source-batch-action-result"
+            className={bwStyles.notice}
+            data-tone={batchNotice.tone === "error" ? "error" : "success"}
+            style={{ margin: "0 20px 12px" }}
+          >
+            <AlertCircle size={14} aria-hidden="true" />
+            <div>
+              <p style={{ margin: 0 }}>{batchNotice.message}</p>
+              {batchNotice.failures?.length ? (
+                <details style={{ marginTop: 6 }} data-testid="source-batch-action-failures">
+                  <summary style={{ cursor: "pointer", fontWeight: 650 }}>查看逐项失败原因（{batchNotice.failures.length}）</summary>
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                    {batchNotice.failures.map((failure) => (
+                      <li key={failure.id}>{failure.label}：{failure.reason}</li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
         {loading ? (
           <div className="space-y-3" style={{ padding: "0 20px 20px" }}>
             <Skeleton className="h-12 w-full rounded-xl" />
@@ -2733,17 +2772,26 @@ async function handleBatchDetailEnrichmentConfirm(batch: SourceBatchSummary) {
                         )}
                       </td>
                       <td style={{ textAlign: "right" }}>
-                        <button
-                          type="button"
-                          data-testid="enter-batch-workspace-button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleExpandBatch(batch.id);
-                          }}
-                          className={`${sourceStyles.rowAction}${isSelected ? ` ${sourceStyles.rowActionActive}` : ""}`}
-                        >
-                          {isSelected ? "工作区中" : "进入工作区 →"}
-                        </button>
+                        <div className={sourceStyles.rowActions}>
+                          <button
+                            type="button"
+                            data-testid="enter-batch-workspace-button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleExpandBatch(batch.id);
+                            }}
+                            className={`${sourceStyles.rowAction}${isSelected ? ` ${sourceStyles.rowActionActive}` : ""}`}
+                          >
+                            {isSelected ? "工作区中" : "进入工作区 →"}
+                          </button>
+                          <BatchRowActionsMenu
+                            batch={batch}
+                            busy={batchActionBusy}
+                            onArchive={(target) => { void handleArchiveBatch(target); }}
+                            onRestore={(target) => { void handleRestoreBatch(target); }}
+                            onDelete={handleDeleteBatch}
+                          />
+                        </div>
                       </td>
                     </tr>
                   );
@@ -3204,6 +3252,19 @@ async function handleBatchDetailEnrichmentConfirm(batch: SourceBatchSummary) {
             </strong>{" "}
             吗？
           </p>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs text-slate-600" data-testid="batch-delete-object-summary">
+            <dt className="font-semibold text-slate-500">商品数量</dt>
+            <dd>{targetBatchToDelete?.rawCount ?? targetBatchToDelete?.itemCount ?? 0} 款</dd>
+            <dt className="font-semibold text-slate-500">下游引用</dt>
+            <dd>
+              {targetBatchToDelete?.marketScan
+                ? `已建立市场研究「${targetBatchToDelete.marketScan.scanName}」；服务端将检查 02/03/04 引用并拦截物理删除。`
+                : "未记录已建立的市场研究；服务端仍会在删除前检查市场分析、候选池与研究任务引用。"}
+            </dd>
+          </dl>
+          <p className="text-xs text-slate-500 leading-relaxed">
+            物理删除只会移除本地来源记录，不可撤销；不可变 EvidenceStore 证据不会被删除。若被下游引用，请改用「归档」。
+          </p>
 
           {batchProtectionWarning && (
             <div
@@ -3311,6 +3372,123 @@ async function handleBatchDetailEnrichmentConfirm(batch: SourceBatchSummary) {
         ) : null}
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * 批次列表行内「更多」菜单：把归档 / 恢复 / 删除放回主页面可见位置。
+ * 删除仍走服务端依赖保护与 CAS；这里只负责入口与确认弹窗的触发。
+ */
+function BatchRowActionsMenu({
+  batch,
+  busy,
+  onArchive,
+  onRestore,
+  onDelete,
+}: {
+  batch: SourceBatchSummary;
+  busy: boolean;
+  onArchive: (batch: SourceBatchSummary) => void;
+  onRestore: (batch: SourceBatchSummary) => void;
+  onDelete: (batch: SourceBatchSummary) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ left: 0, top: 0 });
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onKey(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      buttonRef.current?.focus();
+    }
+    function onPointer(event: MouseEvent | PointerEvent) {
+      const menu = menuRef.current;
+      const trigger = buttonRef.current;
+      if (event.target instanceof Node && (menu?.contains(event.target) || trigger?.contains(event.target))) return;
+      setOpen(false);
+    }
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onPointer);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onPointer);
+    };
+  }, [open]);
+
+  const toggle = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    const box = buttonRef.current?.getBoundingClientRect();
+    if (box) {
+      const width = 196;
+      setPosition({
+        left: Math.max(8, Math.min(box.right - width, window.innerWidth - width - 8)),
+        top: Math.min(box.bottom + 6, window.innerHeight - 150),
+      });
+    }
+    setOpen((prev) => !prev);
+  };
+
+  const choose = (action: (batch: SourceBatchSummary) => void) => {
+    setOpen(false);
+    action(batch);
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        ref={buttonRef}
+        className={sourceStyles.rowMenuButton}
+        aria-expanded={open}
+        aria-controls={`batch-row-actions-${batch.id}`}
+        aria-label="更多批次操作"
+        title="更多批次操作"
+        data-testid="batch-row-more-actions"
+        disabled={busy}
+        onClick={toggle}
+      >
+        <MoreHorizontal size={16} aria-hidden="true" />
+      </button>
+      {open
+        ? createPortal(
+            <div
+              ref={menuRef}
+              id={`batch-row-actions-${batch.id}`}
+              role="group"
+              aria-label="更多批次操作"
+              className={`${sourceStyles.toolsPopover} ${sourceStyles.rowActionsMenu}`}
+              style={{ position: "fixed", left: position.left, top: position.top }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                data-testid={batch.archivedAt ? "batch-row-restore-button" : "batch-row-archive-button"}
+                disabled={busy}
+                onClick={() => choose(batch.archivedAt ? onRestore : onArchive)}
+              >
+                {batch.archivedAt
+                  ? <RefreshCw size={13} aria-hidden="true" />
+                  : <Archive size={13} aria-hidden="true" />}
+                {batch.archivedAt ? "恢复批次" : "归档批次"}
+              </button>
+              <button
+                type="button"
+                className={sourceStyles.rowMenuDanger}
+                data-testid="batch-row-delete-button"
+                disabled={busy}
+                onClick={() => choose(onDelete)}
+              >
+                <Trash2 size={13} aria-hidden="true" />
+                删除批次
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   );
 }
 

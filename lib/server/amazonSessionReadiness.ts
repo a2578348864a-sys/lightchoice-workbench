@@ -22,6 +22,10 @@ import {
 import { loadPlaywright } from "@/lib/server/playwrightRuntime";
 import { newTraceId } from "@/lib/sourceLayer/diagnostics";
 import { AMAZON_PROFILE_DIR, launchAmazonCapturePersistentContext, recordBrowserDiagnostic } from "@/lib/server/captureRecipeBrowser";
+import {
+  inspectAmazonProfileRuntimeOccupancy,
+  type AmazonProfileRuntimeOccupancy,
+} from "@/lib/server/amazonBrowserLauncher";
 import { resolveSystemBrowser } from "@/tools/collectors/amazon/browser-control";
 import { readCaptureRuntimeConfig } from "@/scripts/ops/capture-runtime-config.mjs";
 
@@ -88,6 +92,7 @@ type OpenedSession =
 export type AmazonSessionReadinessDeps = {
   checkPreflight?: (proxyEnv: AmazonCaptureProxyEnv) => Promise<AmazonCapturePreflightResult>;
   openSession?: (proxyEnv: AmazonCaptureProxyEnv) => Promise<OpenedSession>;
+  inspectProfileOccupancy?: (profileDir: string) => Promise<AmazonProfileRuntimeOccupancy>;
 };
 
 /**
@@ -249,6 +254,24 @@ export async function checkAmazonSessionReadiness(input: {
     });
     await audit(blocked, "blocked");
     return blocked;
+  }
+
+  const profileOccupancy = await (input.deps?.inspectProfileOccupancy ?? inspectAmazonProfileRuntimeOccupancy)(AMAZON_PROFILE_DIR);
+  if (profileOccupancy.appLease || profileOccupancy.browserLock || profileOccupancy.browserProcess) {
+    const occupied = finish({
+      status: "BROWSER_UNAVAILABLE",
+      message: profileOccupancy.browserLock || profileOccupancy.browserProcess
+        ? "Amazon 专用浏览器仍在运行，请先关闭浏览器窗口，再重新检查会话。"
+        : "Amazon 采集 Profile 正在被工作台使用；请等待当前操作完成后重试。",
+      networkPreflight,
+      exitCountry: preflight.exitCountry,
+      exitCountryName: preflight.exitCountryName ?? null,
+      failureStage: "BROWSER_LAUNCH",
+      failureKind: null,
+      errorCode: "PROFILE_IN_USE",
+    });
+    await audit(occupied, "blocked");
+    return occupied;
   }
 
   const opened = await (input.deps?.openSession ?? openAmazonCaptureSession)(proxyEnv);

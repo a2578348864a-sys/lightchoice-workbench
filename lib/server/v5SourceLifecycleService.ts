@@ -237,26 +237,82 @@ function asVersion(date: Date) {
   return resourceVersion(date);
 }
 
-async function tasksForCandidates(candidateIds: readonly string[]): Promise<string[]> {
-  if (!candidateIds.length) return [];
-  const tasks = await prisma.viralAnalysisRecord.findMany({
-    where: { type: "workflow" },
-    select: { id: true, resultJson: true },
-  });
-  return tasks.filter((task) => {
+type DependencyScanRow = {
+  id: string;
+  scanName: string;
+  sampleDefinitionJson: string;
+  sampleSnapshotJson: string;
+  archivedAt: Date | null;
+  updatedAt: Date;
+};
+
+type DependencyContext = {
+  scans: DependencyScanRow[];
+  candidateIdsByItemId: Map<string, string[]>;
+  taskIdsByCandidateId: Map<string, string[]>;
+};
+
+/**
+ * 依赖判定所需的只读上下文。
+ *
+ * 批次详情（最多 100 条商品）此前对每条商品分别扫描全量 MarketScan 与工作流任务，
+ * 形成 O(items × scans/tasks) 的重复查询。这里按请求只加载一次，再在内存中按条目匹配，
+ * 判定口径与逐条实现保持一致。
+ */
+async function loadDependencyContext(itemIds: readonly string[]): Promise<DependencyContext> {
+  const [scans, candidates] = await Promise.all([
+    prisma.marketScan.findMany({
+      where: { ownerScope: OWNER },
+      select: {
+        id: true,
+        scanName: true,
+        sampleDefinitionJson: true,
+        sampleSnapshotJson: true,
+        archivedAt: true,
+        updatedAt: true,
+      },
+    }),
+    itemIds.length
+      ? prisma.opportunityCandidate.findMany({
+          where: { originProductBatchItemId: { in: [...itemIds] } },
+          select: { id: true, originProductBatchItemId: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const candidateIdsByItemId = new Map<string, string[]>();
+  const candidateIds: string[] = [];
+  for (const candidate of candidates) {
+    candidateIds.push(candidate.id);
+    if (!candidate.originProductBatchItemId) continue;
+    const list = candidateIdsByItemId.get(candidate.originProductBatchItemId) ?? [];
+    list.push(candidate.id);
+    candidateIdsByItemId.set(candidate.originProductBatchItemId, list);
+  }
+  const tasks = candidateIds.length
+    ? await prisma.viralAnalysisRecord.findMany({
+        where: { type: "workflow" },
+        select: { id: true, resultJson: true },
+      })
+    : [];
+  const candidateSet = new Set(candidateIds);
+  const taskIdsByCandidateId = new Map<string, string[]>();
+  for (const task of tasks) {
     const result = parseJsonRecord(task.resultJson);
     const candidateId = result.candidateToTask && typeof result.candidateToTask === "object"
       ? (result.candidateToTask as Record<string, unknown>).candidateId
       : undefined;
-    return typeof candidateId === "string" && candidateIds.includes(candidateId);
-  }).map((task) => task.id);
+    if (typeof candidateId !== "string" || !candidateSet.has(candidateId)) continue;
+    const list = taskIdsByCandidateId.get(candidateId) ?? [];
+    list.push(task.id);
+    taskIdsByCandidateId.set(candidateId, list);
+  }
+  return { scans, candidateIdsByItemId, taskIdsByCandidateId };
 }
 
-async function scanRefsForItem(item: { id: string; productKey: string; asin: string | null; evidenceHash: string }): Promise<string[]> {
-  const scans = await prisma.marketScan.findMany({
-    where: { ownerScope: OWNER },
-    select: { id: true, sampleSnapshotJson: true },
-  });
+function scanRefsForItem(
+  item: { id: string; productKey: string; asin: string | null; evidenceHash: string },
+  scans: readonly { id: string; sampleSnapshotJson: string }[],
+): string[] {
   const matches: string[] = [];
   for (const scan of scans) {
     const snapshot = parseJsonRecord(scan.sampleSnapshotJson);
@@ -273,19 +329,13 @@ async function scanRefsForItem(item: { id: string; productKey: string; asin: str
   return matches;
 }
 
-async function itemDependencies(item: {
-  id: string;
-  productKey: string;
-  asin: string | null;
-  evidenceHash: string;
-}): Promise<DependencySummary> {
-  const candidates = await prisma.opportunityCandidate.findMany({
-    where: { originProductBatchItemId: item.id },
-    select: { id: true },
-  });
-  const candidateIds = candidates.map((candidate) => candidate.id);
-  const marketScanIds = await scanRefsForItem(item);
-  const taskIds = await tasksForCandidates(candidateIds);
+function itemDependencies(
+  item: { id: string; productKey: string; asin: string | null; evidenceHash: string },
+  context: DependencyContext,
+): DependencySummary {
+  const candidateIds = context.candidateIdsByItemId.get(item.id) ?? [];
+  const marketScanIds = scanRefsForItem(item, context.scans);
+  const taskIds = [...new Set(candidateIds.flatMap((candidateId) => context.taskIdsByCandidateId.get(candidateId) ?? []))];
   const deleteBlockedBy = [
     ...(candidateIds.length ? ["candidate_origin"] : []),
     ...(marketScanIds.length ? ["market_sample"] : []),
@@ -301,11 +351,18 @@ async function itemDependencies(item: {
   };
 }
 
-async function batchDependencies(batchId: string) {
-  const items = await prisma.productBatchItem.findMany({ where: { batchId }, select: {
+async function batchDependencies(
+  batchId: string,
+  preloaded?: {
+    items: Array<{ id: string; productKey: string; asin: string | null; evidenceHash: string }>;
+    context: DependencyContext;
+  },
+) {
+  const items = preloaded?.items ?? await prisma.productBatchItem.findMany({ where: { batchId }, select: {
     id: true, productKey: true, asin: true, evidenceHash: true,
   } });
-  const summaries = await Promise.all(items.map(itemDependencies));
+  const context = preloaded?.context ?? await loadDependencyContext(items.map((item) => item.id));
+  const summaries = items.map((item) => itemDependencies(item, context));
   const candidateIds = [...new Set(summaries.flatMap((item) => item.candidateIds))];
   const marketScanIds = [...new Set(summaries.flatMap((item) => item.marketScanIds))];
   const taskIds = [...new Set(summaries.flatMap((item) => item.taskIds))];
@@ -543,12 +600,14 @@ async function findBatch(batchId: string) {
   return batch;
 }
 
-async function buildScanByBatchIdMap() {
-  const unarchivedScans = await prisma.marketScan.findMany({
+async function buildScanByBatchIdMap(preloadedScans?: readonly DependencyScanRow[]) {
+  const unarchivedScans = (preloadedScans ?? await prisma.marketScan.findMany({
     where: { ownerScope: OWNER, archivedAt: null },
-    select: { id: true, scanName: true, sampleDefinitionJson: true, sampleSnapshotJson: true, updatedAt: true },
+    select: { id: true, scanName: true, sampleDefinitionJson: true, sampleSnapshotJson: true, archivedAt: true, updatedAt: true },
     orderBy: { updatedAt: "desc" },
-  });
+  }))
+    .filter((scan) => scan.archivedAt === null)
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
 
   const scanByBatchId = new Map<string, { id: string; scanName: string; sampleCount: number }>();
   for (const scan of unarchivedScans) {
@@ -684,9 +743,10 @@ export async function getSourceBatch(input: { context: AccessContext; batchId: s
   requireOwner(input.context);
   const batch = await findBatch(input.batchId);
   const items = await prisma.productBatchItem.findMany({ where: { batchId: batch.id }, orderBy: { ordinal: "asc" } });
-  const dependencies = await Promise.all(items.map(itemDependencies));
+  const dependencyContext = await loadDependencyContext(items.map((item) => item.id));
+  const dependencies = items.map((item) => itemDependencies(item, dependencyContext));
   const moduleEvidence = await moduleEvidenceByItem(input.context, batch.id, items);
-  const scanByBatchId = await buildScanByBatchIdMap();
+  const scanByBatchId = await buildScanByBatchIdMap(dependencyContext.scans);
   const stats = computeBatchStats(batch, items, scanByBatchId);
   return {
     batch: {
@@ -702,7 +762,7 @@ export async function getSourceBatch(input: { context: AccessContext; batchId: s
       ...itemView(item, dependencies[index], batch.archivedAt),
       ...moduleEvidence[index],
     })),
-    dependencySummary: await batchDependencies(batch.id),
+    dependencySummary: await batchDependencies(batch.id, { items, context: dependencyContext }),
   };
 }
 
@@ -718,7 +778,8 @@ export async function sourceItemAction(input: {
     execute: async () => {
       const item = await findItem(input.itemId);
       assertExpectedVersionMatches(expectedVersion, item.updatedAt);
-      const deps = await itemDependencies(item);
+      const dependencyContext = await loadDependencyContext([item.id]);
+      const deps = itemDependencies(item, dependencyContext);
       if (input.action === "delete") {
         if (deps.deleteBlockedBy.length) throw new V5CoreError("DELETE_DEPENDENCY_BLOCKED", "该来源条目仍被业务对象引用，只能归档。", 409, false, true, { dependencySummary: deps });
         await prisma.productBatchItem.delete({ where: { id: item.id } });
@@ -727,7 +788,7 @@ export async function sourceItemAction(input: {
       if (input.action === "restore" && item.archivedAt === null) throw new V5CoreError("NOT_ARCHIVED", "来源条目当前未归档。", 409, false, true);
       const archivedAt = input.action === "archive" ? new Date() : null;
       const updated = await prisma.productBatchItem.update({ where: { id: item.id }, data: { archivedAt } });
-      const nextDeps = await itemDependencies(updated);
+      const nextDeps = itemDependencies(updated, dependencyContext);
       const parent = await prisma.productBatch.findUniqueOrThrow({ where: { id: item.batchId }, select: { archivedAt: true } });
       return { item: itemView(updated, nextDeps, parent.archivedAt), outcome: input.action === "archive" ? "archived" : "restored", dependencySummary: { ...nextDeps, deleteBlockedBy: [] } };
     },

@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
         select: { id: true, scanName: true, marketplace: true, createdAt: true, updatedAt: true, sampleDefinitionJson: true, sampleHash: true, metricsJson: true, metricsVersion: true, sampleCount: true },
       }),
       prisma.productBatchItem.count({ where: { archivedAt: null } }),
-      listResearch({ context: auth.context, view: "all" }),
+      listResearch({ context: auth.context, view: "all", light: true }),
     ]);
     const market = marketRows.length;
     const marketWorkflow = marketRows.map((scan) => readMarketWorkflowMetadata(parseJsonRecord(scan.sampleDefinitionJson), {

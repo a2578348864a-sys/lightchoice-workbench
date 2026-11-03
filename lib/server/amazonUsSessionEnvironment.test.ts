@@ -106,8 +106,16 @@ describe("ensureAmazonUsSessionEnvironment", () => {
 
     expect(result).toMatchObject({ ok: true, stage: "SESSION_READY", deliveryBefore: "US" });
     expect(goto).toHaveBeenCalledTimes(1);
-    expect(waitForSelector).toHaveBeenCalledTimes(1);
+    expect(waitForSelector).toHaveBeenCalledTimes(3);
     expect(waitForSelector).toHaveBeenCalledWith("#nav-logo-sprites, #nav-logo", {
+      state: "attached",
+      timeout: 5_000,
+    });
+    expect(waitForSelector).toHaveBeenCalledWith("#glow-ingress-line2, #nav-global-location-data-modal-action", {
+      state: "attached",
+      timeout: 5_000,
+    });
+    expect(waitForSelector).toHaveBeenCalledWith("#nav-link-accountList-nav-line-1", {
       state: "attached",
       timeout: 5_000,
     });

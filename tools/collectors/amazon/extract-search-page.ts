@@ -182,10 +182,10 @@ export function deriveObservedAmazonMarketContext(
     ? "US"
     : null;
   const pricedCurrencies = sampledPriceCurrencies.filter((value): value is "USD" | "JPY" => value !== null);
-  const everySampleCurrencyKnown = sampledPriceCurrencies.length > 0
-    && pricedCurrencies.length === sampledPriceCurrencies.length;
   const uniqueCurrencies = new Set(pricedCurrencies);
-  const currency = everySampleCurrencyKnown && uniqueCurrencies.size === 1 ? pricedCurrencies[0] : null;
+  // 无价格样本（例如 "See options"）不构成币种证据，也不与已观测币种冲突；
+  // 但必须至少有一个明确观测，且所有已观测币种一致，避免把「未读到」或混合币种推断成 USD。
+  const currency = pricedCurrencies.length > 0 && uniqueCurrencies.size === 1 ? pricedCurrencies[0] : null;
   const market = marketplace === "amazon.com" && deliveryRegionMarket === "US" ? "US" : null;
   return {
     marketplace,

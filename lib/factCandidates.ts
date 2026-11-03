@@ -1,0 +1,481 @@
+/**
+ * V3 UX Closure — Fact Candidate 提取（Evidence → Fact Candidate）
+ *
+ * 从已有确定性证据提取「可人工确认的商品事实候选」。安全原则：
+ * - 只提取确定性来源（SellerSprite productFacts / browserEvidence / 商品标题派生）；
+ * - AI Summary / VOC / Competitor / Sourcing Seller Claims 一律不进入（禁止自动升权）；
+ * - 输出永远是 candidate（humanConfirmationRequired=true），只有人工确认后才成为 Confirmed Fact；
+ * - 宁缺勿错：来源不支持就不提取，不强制填满字段（动态 Fact Set）。
+ *
+ * 纯函数：无 DB / 无网络 / 无时间 / 无随机。
+ */
+import { deriveTitleProductFacts } from "@/lib/titleDerivedProductFacts";
+
+export const FACT_CANDIDATES_SCHEMA = "fact-candidates.v1" as const;
+export const FACT_CANDIDATES_VERSION = 1 as const;
+
+export type FactCandidateSourceKind =
+  | "seller_sprite_product_facts"
+  | "amazon_browser_evidence"
+  | "product_title"
+  | "amazon_product_info"
+  | "human_manual";
+
+export type FactCandidate = {
+  candidateId: string;
+  field: string;
+  label: string;
+  value: string | number;
+  /** 确定性来源分类（禁止 AI/VOC/competitor/seller claims 升权） */
+  sourceKind: FactCandidateSourceKind;
+  /** 可追溯来源引用（如 evidenceRef / 字段路径） */
+  sourceRef: string;
+  humanConfirmationRequired: true;
+  /**
+   * V3R（契约③ PROVENANCE_MERGE）：同字段其他来源的并列值（多 Provenance 保留）。
+   * 旧逻辑 first-source-wins 静默丢弃（如 price：SellerSprite 13.99 vs Amazon 10.99）；
+   * 现在并列展示，人工确认时可看到多来源差异后再决定值。仅视图层，不持久化。
+   */
+  alternateSources?: Array<{
+    sourceKind: FactCandidateSourceKind;
+    sourceRef: string;
+    value: string | number;
+  }>;
+};
+
+export type ConfirmedFactCandidate = FactCandidate & {
+  confirmedAt: string;
+  confirmedBy: string;
+};
+
+/**
+ * Amazon 研究 Preview 的闭环记录。
+ *
+ * 该记录只描述「哪一个已绑定 Preview 的候选集合已经被人工处理完」，
+ * 不替代 Confirmed Fact，也不改变 factCandidates 的事实权威。它让编排器
+ * 在 Preview 被消费后，仍能从持久化 resultJson 判断这个 Amazon 来源已经
+ * 完成闭环；所有身份字段均为服务端生成并校验的绑定信息。
+ */
+export type AmazonPreviewResolutionV1 = {
+  previewId: string;
+  taskId: string;
+  asin: string;
+  subjectKey: string;
+  candidateRefs: Array<{
+    candidateId: string;
+    field: string;
+    sourceKind: FactCandidateSourceKind;
+    sourceRef: string;
+  }>;
+  resolvedAt: string;
+};
+
+export type FactCandidatesV1 = {
+  schema: typeof FACT_CANDIDATES_SCHEMA;
+  version: typeof FACT_CANDIDATES_VERSION;
+  /** 已确认候选（持久化权威；确认即从候选升级，来源与值保留） */
+  confirmed: ConfirmedFactCandidate[];
+  /** 已完成身份闭环的 Amazon Pending Preview（兼容旧数据，可缺省） */
+  amazonPreviewResolutions?: AmazonPreviewResolutionV1[];
+  updatedAt: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function displayValue(value: unknown): string | number | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return null;
+}
+
+function candidateIdFor(field: string, sourceKind: FactCandidateSourceKind): string {
+  // 确定性 id：field+source 的稳定指纹（重复提取同一候选可去重）
+  return `${sourceKind}:${field}`;
+}
+
+const LABELS: Record<string, string> = {
+  brand: "品牌",
+  product_type: "商品类型",
+  series_or_model: "系列/型号",
+  capacity: "容量",
+  material: "材质",
+  dimensions: "尺寸",
+  weight: "重量",
+  color_or_variant: "颜色/款式",
+  quantity_or_pack_size: "数量/包装",
+  category: "类目",
+  price: "参考价格 (USD)",
+  rating: "评分",
+  reviews: "评论数",
+  bsr: "大类 BSR",
+  functional_feature: "功能特性",
+  care: "清洁保养",
+  construction: "构造",
+  included_components: "随附组件",
+  operation: "操作方式",
+  compatibility: "兼容性",
+};
+
+/**
+ * 市场观察字段（market_observation，非商品事实）：
+ * category/price/rating/reviews/bsr 反映「平台市场状态」而非「商品本身规格」。
+ * 契约④ MARKET_OBSERVATION：这些字段确认后不参与商品事实计数、不进 Listing
+ * （消费端硬排除已正确）；展示/计数层必须与 product_fact 分离。
+ */
+export const MARKET_OBSERVATION_FIELDS: ReadonlySet<string> = new Set([
+  "category",
+  "price",
+  "rating",
+  "reviews",
+  "bsr",
+]);
+
+/** 字段 → 事实类别：product_fact（商品事实）| market_observation（市场观察） */
+export function factCategoryOf(field: string): "product_fact" | "market_observation" {
+  return MARKET_OBSERVATION_FIELDS.has(field) ? "market_observation" : "product_fact";
+}
+
+/** 手动补充事实的可选字段注册表（供 [+手动补充商品事实] 下拉使用）。
+ * 与既有 canonical fact field 一致；不同商品可只填相关字段（动态 Fact Set）。
+ */
+export const MANUAL_FACT_FIELDS: ReadonlyArray<{ field: string; label: string }> = [
+  { field: "brand", label: "品牌" },
+  { field: "product_type", label: "商品类型" },
+  { field: "series_or_model", label: "系列/型号" },
+  { field: "material", label: "材质" },
+  { field: "capacity", label: "容量" },
+  { field: "dimensions", label: "尺寸" },
+  { field: "weight", label: "重量" },
+  { field: "color_or_variant", label: "颜色/款式" },
+  { field: "quantity_or_pack_size", label: "数量/包装" },
+  { field: "functional_feature", label: "功能特性" },
+  { field: "care", label: "清洁保养" },
+  { field: "construction", label: "构造" },
+  { field: "included_components", label: "随附组件" },
+  { field: "operation", label: "操作方式" },
+  { field: "compatibility", label: "兼容性" },
+];
+
+/** 手动补充事实的确定性 candidateId（sourceKind=human_manual） */
+export function humanManualCandidateId(field: string): string {
+  return `human_manual:${field}`;
+}
+
+/**
+ * 读取「扁平投影」的候选分析上下文事实。
+ *
+ * 背景（数据映射修复）：候选分析上下文有两种已落地形状——
+ * - `verified_product_batch`：事实在 `facts.productFacts` 子对象里；
+ * - `verified_seller_sprite`（SellerSprite 市场研究 / 来源层）：事实是**扁平投影**，
+ *   直接放在 `facts.title` / `facts.brand` / `facts.priceUsd` / `facts.rating` /
+ *   `facts.reviewCount` / `facts.category`；
+ *   大类 BSR 优先读 `facts.rootCategoryBsr`，旧数据没有该字段时回退 `facts.searchRank`。
+ *
+ * 早期提取器只认前者，导致来源层候选的候选事实恒为 0，用户无法确认任何商品事实。
+ * 这里只做键名映射，值原样取自证据，**不猜测、不补全**；缺失的键不产出候选。
+ *
+ * 安全边界不变：产出物仍是 candidate（humanConfirmationRequired=true），
+ * 仍须人工确认后才成为事实；来源标记为 seller_sprite_product_facts（供应商导出观察）。
+ */
+function flatSellerSpriteFacts(cacFacts: Record<string, unknown>): Record<string, unknown> | null {
+  const out: Record<string, unknown> = {};
+  const title = displayValue(cacFacts.title);
+  if (title !== null) out.productTitle = title;
+  const brand = displayValue(cacFacts.brand);
+  if (brand !== null) out.brand = brand;
+  const category = displayValue(cacFacts.category);
+  if (category !== null) out.rootCategory = category;
+  const price = displayValue(cacFacts.priceUsd);
+  if (price !== null) out.price = price;
+  const rating = displayValue(cacFacts.rating);
+  if (rating !== null) out.rating = rating;
+  const reviews = displayValue(cacFacts.reviewCount);
+  if (reviews !== null) out.reviews = reviews;
+  // 大类 BSR：优先显式 rootCategoryBsr（来源层交接写入），旧数据回退 searchRank。
+  const bsr = displayValue(cacFacts.rootCategoryBsr) ?? displayValue(cacFacts.searchRank);
+  if (bsr !== null) out.rootCategoryBsr = bsr;
+  const subCategoryBsr = displayValue(cacFacts.subCategoryBsr);
+  if (subCategoryBsr !== null) out.subCategoryBsr = subCategoryBsr;
+  const estimatedMonthlySales = displayValue(cacFacts.estimatedMonthlySales);
+  if (estimatedMonthlySales !== null) out.estimatedMonthlySales = estimatedMonthlySales;
+  const estimatedMonthlyRevenue = displayValue(cacFacts.estimatedMonthlyRevenueUsd);
+  if (estimatedMonthlyRevenue !== null) out.estimatedMonthlyRevenue = estimatedMonthlyRevenue;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * 从 resultJson 提取 Fact Candidates。
+ * @param resultJson 任务 resultJson（含 candidateAnalysisContext / browserEvidence / sourceMeta）
+ */
+export function extractFactCandidates(resultJson: unknown): FactCandidate[] {
+  if (!isRecord(resultJson)) return [];
+  const candidates: FactCandidate[] = [];
+  const seen = new Set<string>();
+
+  const push = (candidate: Omit<FactCandidate, "candidateId" | "humanConfirmationRequired" | "alternateSources">) => {
+    // V3R（契约③ PROVENANCE_MERGE）：同字段多来源不再静默丢弃——
+    // 首来源作为候选值（first-source-wins 仅用于选默认值），其余来源并列保留在
+    // alternateSources 供人工核对（如 price：SellerSprite 13.99 vs Amazon 10.99）。
+    const existing = candidates.find((c) => c.field === candidate.field);
+    if (existing) {
+      existing.alternateSources = [
+        ...(existing.alternateSources ?? []),
+        { sourceKind: candidate.sourceKind, sourceRef: candidate.sourceRef, value: candidate.value },
+      ];
+      return;
+    }
+    seen.add(candidate.field);
+    const id = candidateIdFor(candidate.field, candidate.sourceKind);
+    candidates.push({ ...candidate, candidateId: id, humanConfirmationRequired: true });
+  };
+
+  // 1) SellerSprite productFacts（sourceMeta.productBatchSnapshot 或 candidateAnalysisContext.facts）
+  let productFacts: Record<string, unknown> | null = null;
+  // productFacts 的来源标记：ProductBatch 走 sourceMeta 快照，市场研究/来源层走候选分析上下文扁平投影。
+  // 仅用于 sourceRef 表述，不改变任何可信度判定。
+  let productFactsSourceRef = "seller_sprite.productFacts";
+  const sourceMeta = isRecord(resultJson.sourceMeta) ? resultJson.sourceMeta : null;
+  const batchSnapshot = sourceMeta && isRecord(sourceMeta.productBatchSnapshot)
+    ? sourceMeta.productBatchSnapshot
+    : null;
+  const cac = isRecord(resultJson.candidateAnalysisContext) ? resultJson.candidateAnalysisContext : null;
+  const cacFacts = cac && isRecord(cac.facts) ? cac.facts : null;
+  if (batchSnapshot && isRecord(batchSnapshot.productFacts)) {
+    productFacts = batchSnapshot.productFacts;
+  } else if (cacFacts && isRecord(cacFacts.productFacts)) {
+    productFacts = cacFacts.productFacts;
+  } else if (cacFacts) {
+    // 扁平投影（verified_seller_sprite）：没有 productFacts 子对象时按既有键名映射。
+    productFacts = flatSellerSpriteFacts(cacFacts);
+    if (productFacts) productFactsSourceRef = "candidateAnalysisContext.facts";
+  }
+  if (productFacts) {
+    const brand = displayValue(productFacts.brand);
+    if (brand) push({ field: "brand", label: LABELS.brand, value: brand, sourceKind: "seller_sprite_product_facts", sourceRef: `${productFactsSourceRef}.brand` });
+    const category = displayValue(productFacts.rootCategory) ?? displayValue(productFacts.subCategory);
+    if (category) push({ field: "category", label: LABELS.category, value: category, sourceKind: "seller_sprite_product_facts", sourceRef: `${productFactsSourceRef}.rootCategory` });
+    const price = displayValue(productFacts.price);
+    if (price !== null) push({ field: "price", label: LABELS.price, value: price, sourceKind: "seller_sprite_product_facts", sourceRef: `${productFactsSourceRef}.price` });
+    const rating = displayValue(productFacts.rating);
+    if (rating !== null) push({ field: "rating", label: LABELS.rating, value: rating, sourceKind: "seller_sprite_product_facts", sourceRef: `${productFactsSourceRef}.rating` });
+    const reviews = displayValue(productFacts.reviews);
+    if (reviews !== null) push({ field: "reviews", label: LABELS.reviews, value: reviews, sourceKind: "seller_sprite_product_facts", sourceRef: `${productFactsSourceRef}.reviews` });
+    const bsr = displayValue(productFacts.rootCategoryBsr);
+    if (bsr !== null) push({ field: "bsr", label: LABELS.bsr, value: bsr, sourceKind: "seller_sprite_product_facts", sourceRef: `${productFactsSourceRef}.rootCategoryBsr` });
+    // capacity 派生：标题含 "12oz" 等明确单位
+    const title = displayValue(productFacts.productTitle);
+    if (typeof title === "string") {
+      const capacityMatch = title.match(/(\d+(?:\.\d+)?)\s*(oz|ml|l)\b/i);
+      if (capacityMatch) {
+        push({ field: "capacity", label: LABELS.capacity, value: `${capacityMatch[1]}${capacityMatch[2].toLowerCase()}`, sourceKind: "seller_sprite_product_facts", sourceRef: `${productFactsSourceRef}.productTitle` });
+      }
+    }
+  }
+
+  // 2) 商品标题派生（复用既有 titleDerivedProductFacts：material/capacity/color/quantity/product_type/series）
+  //    标题优先级：Amazon 页面完整标题（browserEvidence）> SellerSprite 商品标题 > sourceMeta 快照
+  let titleForDerivation: string | null = null;
+  const browserTitle = (() => {
+    const b = isRecord(resultJson.browserEvidence) ? resultJson.browserEvidence : null;
+    const s = b && Array.isArray(b.snapshots) && b.snapshots.length > 0 ? b.snapshots[0] : null;
+    if (!isRecord(s) || !isRecord(s.fields) || !isRecord(s.fields.title)) return null;
+    const t = s.fields.title.value;
+    return typeof t === "string" && t.trim() ? t.trim() : null;
+  })();
+  if (browserTitle) {
+    titleForDerivation = browserTitle;
+  } else if (productFacts && typeof displayValue(productFacts.productTitle) === "string") {
+    // productFacts 已覆盖两种形状（含扁平投影映射出的 productTitle）
+    titleForDerivation = displayValue(productFacts.productTitle) as string;
+  } else if (cacFacts && typeof displayValue(cacFacts.title) === "string") {
+    // 兜底：扁平投影存在但没有任何可映射事实时的标题
+    titleForDerivation = displayValue(cacFacts.title) as string;
+  } else {
+    const sourceMeta2 = isRecord(resultJson.sourceMeta) ? resultJson.sourceMeta : null;
+    const candidateSnapshot = sourceMeta2 && isRecord(sourceMeta2.candidateSnapshot)
+      ? sourceMeta2.candidateSnapshot
+      : null;
+    const name = candidateSnapshot && typeof candidateSnapshot.productName === "string"
+      ? candidateSnapshot.productName.trim()
+      : "";
+    if (name) titleForDerivation = name;
+  }
+  if (titleForDerivation) {
+    const derived = deriveTitleProductFacts({ title: titleForDerivation });
+    for (const fact of derived.facts ?? []) {
+      push({
+        field: fact.field,
+        label: LABELS[fact.field] ?? fact.label,
+        value: fact.value,
+        sourceKind: "product_title",
+        sourceRef: "product_title.derived",
+      });
+    }
+  }
+
+  // 3) browserEvidence（Amazon 页面观察：price/rating/reviews/bsr——与 productFacts 去重后补充）
+  const browser = isRecord(resultJson.browserEvidence) ? resultJson.browserEvidence : null;
+  const snapshot = browser && Array.isArray(browser.snapshots) && browser.snapshots.length > 0
+    ? browser.snapshots[0]
+    : null;
+  if (isRecord(snapshot) && isRecord(snapshot.fields)) {
+    const fields = snapshot.fields;
+    const price = displayValue(isRecord(fields.price) ? fields.price.value : null);
+    if (price !== null) push({ field: "price", label: LABELS.price, value: price, sourceKind: "amazon_browser_evidence", sourceRef: "browserEvidence.snapshots[0].fields.price" });
+    const rating = displayValue(isRecord(fields.rating) ? fields.rating.value : null);
+    if (rating !== null) push({ field: "rating", label: LABELS.rating, value: rating, sourceKind: "amazon_browser_evidence", sourceRef: "browserEvidence.snapshots[0].fields.rating" });
+    const reviewCount = displayValue(isRecord(fields.reviewCount) ? fields.reviewCount.value : null);
+    if (reviewCount !== null) push({ field: "reviews", label: LABELS.reviews, value: reviewCount, sourceKind: "amazon_browser_evidence", sourceRef: "browserEvidence.snapshots[0].fields.reviewCount" });
+    const bsr = displayValue(isRecord(fields.bsr) ? fields.bsr.value : null);
+    if (bsr !== null) push({ field: "bsr", label: LABELS.bsr, value: bsr, sourceKind: "amazon_browser_evidence", sourceRef: "browserEvidence.snapshots[0].fields.bsr" });
+  }
+
+  // 4) Product Information 规格行（V3 Final PHASE 1：Bounded DOM 提取的确定性页面观察；
+  //    与 seller_sprite/browser/title 同字段去重后补充——已确认优先级由候选列表过滤处理）
+  if (isRecord(snapshot) && isRecord(snapshot.productInfo) && isRecord(snapshot.productInfo.canonicalFacts)) {
+    const canonicalFacts = snapshot.productInfo.canonicalFacts;
+    for (const [field, value] of Object.entries(canonicalFacts)) {
+      const label = LABELS[field];
+      if (!label) continue; // 未知字段 fail-closed（不进入候选）
+      const normalized = displayValue(value);
+      if (normalized === null) continue;
+      push({
+        field,
+        label,
+        value: normalized,
+        sourceKind: "amazon_product_info",
+        sourceRef: `browserEvidence.snapshots[0].productInfo.${field}`,
+      });
+    }
+  }
+
+  return candidates;
+}
+
+/** 从 resultJson 读取已确认事实候选（factCandidates namespace） */
+export function getFactCandidates(resultJson: unknown): FactCandidatesV1 | null {
+  if (!isRecord(resultJson)) return null;
+  const raw = resultJson.factCandidates;
+  if (!isRecord(raw) || raw.schema !== FACT_CANDIDATES_SCHEMA) return null;
+  if (!Array.isArray(raw.confirmed)) return null;
+  const confirmed: ConfirmedFactCandidate[] = [];
+  for (const item of raw.confirmed) {
+    if (!isRecord(item)) return null;
+    if (typeof item.candidateId !== "string" || typeof item.field !== "string") return null;
+    if (typeof item.label !== "string" || !(typeof item.value === "string" || typeof item.value === "number")) return null;
+    if (typeof item.sourceKind !== "string" || typeof item.sourceRef !== "string") return null;
+    if (typeof item.confirmedAt !== "string" || typeof item.confirmedBy !== "string") return null;
+    confirmed.push(item as unknown as ConfirmedFactCandidate);
+  }
+  const resolutions: AmazonPreviewResolutionV1[] = [];
+  if (raw.amazonPreviewResolutions !== undefined) {
+    if (!Array.isArray(raw.amazonPreviewResolutions)) return null;
+    for (const item of raw.amazonPreviewResolutions) {
+      if (!isRecord(item)) return null;
+      if (
+        typeof item.previewId !== "string" || !item.previewId.trim()
+        || typeof item.taskId !== "string" || !item.taskId.trim()
+        || typeof item.asin !== "string" || !item.asin.trim()
+        || typeof item.subjectKey !== "string" || !item.subjectKey.trim()
+        || typeof item.resolvedAt !== "string" || !item.resolvedAt.trim()
+        || !Array.isArray(item.candidateRefs)
+      ) return null;
+      const candidateRefs: AmazonPreviewResolutionV1["candidateRefs"] = [];
+      for (const ref of item.candidateRefs) {
+        if (!isRecord(ref)) return null;
+        if (
+          typeof ref.candidateId !== "string" || !ref.candidateId.trim()
+          || typeof ref.field !== "string" || !ref.field.trim()
+          || typeof ref.sourceKind !== "string" || !ref.sourceKind.trim()
+          || typeof ref.sourceRef !== "string" || !ref.sourceRef.trim()
+        ) return null;
+        candidateRefs.push({
+          candidateId: ref.candidateId,
+          field: ref.field,
+          sourceKind: ref.sourceKind as FactCandidateSourceKind,
+          sourceRef: ref.sourceRef,
+        });
+      }
+      resolutions.push({
+        previewId: item.previewId,
+        taskId: item.taskId,
+        asin: item.asin.toUpperCase(),
+        subjectKey: item.subjectKey,
+        candidateRefs,
+        resolvedAt: item.resolvedAt,
+      });
+    }
+  }
+  return {
+    schema: FACT_CANDIDATES_SCHEMA,
+    version: FACT_CANDIDATES_VERSION,
+    confirmed,
+    ...(resolutions.length > 0 ? { amazonPreviewResolutions: resolutions } : {}),
+    updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : "",
+  };
+}
+
+export function hasAmazonPreviewResolution(
+  resultJson: unknown,
+  query: { previewId: string; taskId: string; asin: string; subjectKey: string },
+): boolean {
+  const stored = getFactCandidates(resultJson);
+  const normalizedAsin = query.asin.trim().toUpperCase();
+  return (stored?.amazonPreviewResolutions ?? []).some((resolution) => (
+    resolution.previewId === query.previewId
+    && resolution.taskId === query.taskId
+    && resolution.asin === normalizedAsin
+    && resolution.subjectKey === query.subjectKey
+    && resolution.candidateRefs.length > 0
+  ));
+}
+
+export function findAmazonPreviewResolution(query: {
+  resultJson: unknown;
+  taskId: string;
+  asin: string;
+  subjectKey: string;
+}): AmazonPreviewResolutionV1 | null {
+  const stored = getFactCandidates(query.resultJson);
+  const normalizedAsin = query.asin.trim().toUpperCase();
+  const matches = (stored?.amazonPreviewResolutions ?? []).filter((resolution) => (
+    resolution.taskId === query.taskId
+    && resolution.asin === normalizedAsin
+    && resolution.subjectKey === query.subjectKey
+    && resolution.candidateRefs.length > 0
+  ));
+  return matches.length > 0 ? matches[matches.length - 1] : null;
+}
+
+/**
+ * 旧版本兼容：早期事实确认已经保留了 Amazon provenance，但没有保存
+ * Preview identity。仅当至少一条已确认事实明确来自受限的
+ * browserEvidence.snapshots[...] 引用，且当前候选集合中不存在未确认的
+ * Amazon 来源候选时才认为该存量闭环完成；绝不以 pendingCount 单独判断。
+ */
+export function hasLegacyAmazonFactClosure(resultJson: unknown): boolean {
+  const stored = getFactCandidates(resultJson);
+  if (!stored || stored.confirmed.length === 0) return false;
+  const amazonConfirmed = stored.confirmed.filter((item) => (
+    (item.sourceKind === "amazon_browser_evidence" || item.sourceKind === "amazon_product_info")
+    && /^browserEvidence\.snapshots\[\d+\]\./.test(item.sourceRef)
+  ));
+  if (amazonConfirmed.length === 0) return false;
+  const remainingAmazonCandidates = buildFactCandidateView(resultJson).candidates.filter((item) => (
+    item.sourceKind === "amazon_browser_evidence" || item.sourceKind === "amazon_product_info"
+  ));
+  return remainingAmazonCandidates.length === 0;
+}
+
+/** 合并视图：候选（未确认）+ 已确认（权威持久化） */
+export function buildFactCandidateView(
+  resultJson: unknown,
+): { candidates: FactCandidate[]; confirmed: ConfirmedFactCandidate[] } {
+  const extracted = extractFactCandidates(resultJson);
+  const stored = getFactCandidates(resultJson);
+  const confirmedMap = new Map((stored?.confirmed ?? []).map((item) => [item.candidateId, item]));
+  const candidates = extracted.filter((candidate) => !confirmedMap.has(candidate.candidateId));
+  return { candidates, confirmed: stored?.confirmed ?? [] };
+}

@@ -1,0 +1,252 @@
+/* Shell rules directly adapted from approved prototype/hifi-v6/src/styles.css. */
+/* Keep horizontal sidebar usable outside scoped hifi theme (minimal shell fix for all pages). */
+.lc-workspace:has(aside.lc-site-sidebar) .lc-workspace-body { margin-left: 0; }
+.lc-workspace:has(aside.lc-site-sidebar) .lc-workspace-main { width: 100%; max-width: 1760px; margin-inline: auto; }
+
+/* Navigation must work even outside explorer/02 scoped theme */
+.lc-site-v6 {
+  --ink: #172b27;
+  --muted: #61736d;
+  --green: #087f68;
+  --deep: #174d3a;
+  --bg: #f4f8f6;
+  --line: #dde8e2;
+  --action: #bfead0;
+  --action-hover: #afe3c4;
+  --action-ink: #245d43;
+  --panel: #e8f5ed;
+  --shadow: rgba(23, 69, 47, 0.08);
+  font-family: "Segoe UI", "Segoe UI Variable", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --card: #ffffff;
+  --mint: #cdeedc;
+  --ice: #e5f3ed;
+  --peach: #f4d3bc;
+  --panel-line: #cce7d6;
+  --ok-bg: #edf8f1;
+  --ok-ink: #245d43;
+  --ok-line: #d2e7da;
+  --warn-bg: #fbf5e9;
+  --warn-ink: #78602e;
+  --warn-line: #ead9bc;
+  --risk-bg: #f8ebe6;
+  --risk-ink: #9a4530;
+  --risk-line: #e8cfc4;
+  --ai-bg: #eef6f2;
+  --ai-ink: #2a5c48;
+  --ai-line: #c5ddd0;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 18px;
+  --r-xl: 22px;
+}
+
+.lc-site-v6 .lc-workspace { display: grid; grid-template-columns: 212px 1fr; min-height: 100vh; }
+
+.lc-site-v6 .lc-workspace-body { min-width: 0; display: flex; flex-direction: column; }
+
+.lc-site-v6 .lc-topbar {
+  height: 64px; position: sticky; top: 0; z-index: 15;
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 0 28px; background: #ffffff;
+  border-bottom: 1px solid var(--line);
+}
+
+/* 面包屑为全站唯一实现：01/02/03/04 共用同一字号、字重与分隔间距。 */
+.lc-site-breadcrumb { display: flex; gap: 7px; align-items: center; font-size: 14px; color: var(--muted); }
+
+.lc-site-breadcrumb a { color: var(--muted); text-decoration: none; }
+
+.lc-site-breadcrumb strong { color: var(--ink); font-weight: 700; font-size: 14px; }
+
+/* 英文辅助名：只作识别，字号与颜色都低于中文主名，不抢阅读重心。 */
+.lc-site-breadcrumb .lc-breadcrumb-en {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #9db3a9;
+  padding-left: 2px;
+}
+
+@media (max-width: 768px) {
+  .lc-site-breadcrumb .lc-breadcrumb-en { display: none; }
+}
+
+.lc-site-breadcrumb .lc-sep { color: #b0bdb6; }
+
+.lc-site-v6 .lc-top-actions { display: flex; gap: 8px; align-items: center; }
+
+.lc-site-v6 .lc-workspace-main { width: 100%; max-width: 1760px; margin: 0 auto; padding: 18px clamp(20px, 1.8vw, 40px) 56px; }
+
+.lc-site-v6 .lc-flow {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px;
+  padding: 4px; background: #fff; border: 1px solid var(--line);
+  border-radius: 16px; margin-bottom: 16px;
+}
+
+.lc-site-v6 .lc-flow a {
+  padding: 9px 8px; border-radius: 10px; color: var(--muted);
+  font-size: 12px; font-weight: 500; transition: all 150ms ease;
+}
+
+.lc-site-v6 .lc-flow a:hover { background: var(--bg); color: var(--ink); }
+
+.lc-site-v6 .lc-flow a[aria-current="step"] { background: #cbeed8; color: var(--action-ink); font-weight: 650; }
+
+.lc-site-v6 .lc-flow a > span { font-weight: 750; opacity: 0.55; margin-right: 6px; font-size: 11px; }
+
+.lc-site-v6 .lc-more-menu {
+  position: relative;
+}
+
+.lc-site-v6 .lc-more-pop {
+  position: absolute; right: 0; top: calc(100% + 6px); min-width: 220px;
+  background: #fff; border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: 0 12px 32px var(--shadow); padding: 6px; z-index: 40;
+}
+
+.lc-site-v6 .lc-more-pop a {
+  display: block; width: 100%; text-align: left; padding: 9px 12px;
+  border-radius: 9px; font-size: 13px; color: var(--ink);
+}
+
+.lc-site-v6 .lc-more-pop a:hover { background: var(--panel); color: var(--action-ink); }
+
+.lc-site-v6 .lc-more-pop .lc-sep { height: 1px; background: var(--line); margin: 4px 8px; }
+
+.lc-site-v6 { font-family:var(--font); font-size:17px; line-height:1.65; color:var(--ink); background:var(--bg); -webkit-font-smoothing:antialiased; }
+.lc-site-v6 .lc-workspace { background:var(--bg); }
+.lc-site-v6 .lc-workspace-body { margin-left:0; }
+/* 公共顶栏与 01/03/04 同源：高度、内边距、面包屑字重与按钮尺寸都交给全局规则，
+   这里只保留 02 页面需要的粘性定位，避免市场研究单独长成一套顶栏。 */
+.lc-site-v6 .lc-top-actions { margin-left:auto; }
+.lc-site-v6 .lc-top-actions .lc-preview-label { margin:0; padding:2px 8px; font-size:11px; }
+.lc-site-v6 .lc-more-pop { display:grid; gap:2px; }
+.lc-site-v6 .lc-more-pop a { font-size:15px; padding:9px 12px; }
+.lc-site-v6 .lc-more-pop .lc-sep { height:1px; background:var(--line); margin:4px 8px; }
+.lc-site-v6 .lc-workspace-main { max-width:1760px; padding:18px clamp(20px, 1.8vw, 40px) 56px; }
+.lc-site-v6 .lc-flow { min-height:46px; margin:0 0 16px; }
+.lc-site-v6 .lc-flow a { display:flex; align-items:center; justify-content:center; font-size:14px; background:transparent; }
+.lc-site-v6 .lc-flow a[aria-current="step"] { color:var(--action-ink); background:#cbeed8; }
+.lc-site-v6 .lc-flow a > span { margin-right:6px; font-size:12px; }
+.lc-site-v6 main.app-shell:has(.lc-site-sidebar) { padding-left:236px; }
+.lc-site-v6 main.app-shell:has(.lc-site-sidebar) .lc-site-sidebar { position:fixed; width:212px; }
+.lc-site-v6 .lc-without-rail { grid-template-columns:1fr; }
+.lc-site-v6 .lc-command-search input { font-size:17px; }
+.lc-site-v6 .lc-command-list strong { font-size:17px; }
+.lc-site-v6 .lc-command-list small { font-size:14px; }
+
+/* Explorer hifi (3420) */
+.lc-hifi-page { --ink:#172b27; --muted:#61736d; --green:#087f68; --line:#dde8e2; --shadow:rgba(23,69,47,0.08); --action-ink:#245d43; --panel:#e8f5ed; font-size:17px; }
+.lc-hifi-page-head { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:16px; flex-wrap:wrap; }
+.lc-hifi-kicker { display:inline-block; font-size:12px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:var(--green); margin-bottom:6px; }
+.lc-hifi-title { margin:0; font-size:32px; font-weight:700; letter-spacing:-0.02em; line-height:1.2; color:var(--ink); }
+.lc-hifi-sub { margin:8px 0 0; font-size:15px; color:var(--muted); max-width:52ch; line-height:1.6; }
+.lc-hifi-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.lc-hifi-btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:9px 15px; border-radius:10px; border:1px solid var(--line); background:#fff; color:var(--ink); font-size:15px; font-weight:600; text-decoration:none; min-height:42px; }
+.lc-hifi-btn.primary { background:#bfead0; border-color:#b4ddc3; color:var(--action-ink); box-shadow:0 2px 8px rgba(53,119,76,0.1); }
+.lc-hifi-btn.sm { padding:6px 10px; font-size:13px; min-height:32px; }
+.lc-hifi-btn:hover { filter:brightness(0.98); }
+.lc-hifi-dash { display:grid; grid-template-columns:1.2fr 0.8fr; gap:12px; margin-bottom:14px; }
+.lc-hifi-focus { border-radius:18px; border:1px solid #cce7d6; padding:22px 24px; background:linear-gradient(120deg,#e2f6e9,#d5f1df 70%,#c6efd7); }
+.lc-hifi-focus-kicker { font-size:12px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:#52765f; }
+.lc-hifi-focus h2 { margin:8px 0 8px; font-size:26px; font-weight:700; letter-spacing:-0.02em; color:var(--ink); line-height:1.25; }
+.lc-hifi-focus-lead { margin:0 0 12px; font-size:15px; color:#466d56; line-height:1.6; }
+.lc-hifi-focus-qs { display:flex; flex-direction:column; gap:7px; margin:0 0 14px; padding:0; list-style:none; }
+.lc-hifi-focus-qs li { display:flex; gap:10px; align-items:flex-start; font-size:15px; padding:9px 12px; border-radius:10px; background:rgba(255,255,255,0.55); border:1px solid rgba(204,231,214,0.75); color:#2f5544; }
+.lc-hifi-focus-qs span { width:20px; height:20px; border-radius:6px; background:#c4ead3; color:var(--action-ink); display:grid; place-items:center; font-size:12px; font-weight:800; flex-shrink:0; }
+.lc-hifi-side { display:flex; flex-direction:column; gap:10px; }
+.lc-hifi-card { background:#fff; border:1px solid var(--line); border-radius:18px; padding:18px 20px; box-shadow:0 1px 2px rgba(23,69,47,0.04); }
+.lc-hifi-card-title { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px; }
+.lc-hifi-card-title h3 { margin:0; font-size:18px; font-weight:650; }
+.lc-hifi-card-title a, .lc-hifi-card-title span { font-size:13px; color:var(--muted); }
+.lc-hifi-stat { display:block; text-decoration:none; background:#fff; border:1px solid var(--line); border-radius:16px; padding:16px; box-shadow:0 1px 2px rgba(23,69,47,0.04); }
+.lc-hifi-stat.accent { border-top:3px solid var(--green); }
+.lc-hifi-stat .label { display:block; font-size:14px; color:var(--muted); }
+.lc-hifi-stat .num { display:block; font-size:32px; font-weight:700; letter-spacing:-0.03em; color:var(--ink); font-variant-numeric:tabular-nums; line-height:1.15; margin:4px 0; }
+.lc-hifi-stat .hint { display:block; font-size:14px; color:var(--muted); margin-bottom:10px; }
+.lc-hifi-stat .foot { display:block; font-size:13px; color:var(--green); font-weight:650; }
+.lc-hifi-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:14px; }
+.lc-hifi-ready { display:flex; gap:10px; align-items:center; padding:10px 12px; border-radius:12px; background:#edf8f1; border:1px solid #d2e7da; color:#245d43; text-decoration:none; font-size:14px; }
+.lc-hifi-ready .ico { width:28px; height:28px; border-radius:9px; background:#bfead0; display:grid; place-items:center; font-size:12px; font-weight:800; flex-shrink:0; }
+.lc-hifi-ready strong { display:block; font-weight:650; }
+.lc-hifi-ready small { display:block; font-size:12px; opacity:0.85; }
+.lc-hifi-grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:11px; }
+.lc-hifi-opp { display:block; width:100%; text-align:left; text-decoration:none; border:1px solid var(--line); border-radius:16px; background:#fff; overflow:hidden; transition:transform .15s ease, box-shadow .15s ease; }
+.lc-hifi-opp:hover { transform:translateY(-2px); box-shadow:0 8px 20px var(--shadow); }
+.lc-hifi-opp .band { height:3px; background:linear-gradient(90deg,var(--green),#8ed4b4,transparent); }
+.lc-hifi-opp .body { padding:14px; display:flex; flex-direction:column; gap:8px; }
+.lc-hifi-opp h3 { margin:0; font-size:16px; font-weight:650; color:var(--ink); }
+.lc-hifi-opp p { margin:0; font-size:14px; color:var(--muted); line-height:1.5; }
+.lc-hifi-opp-detail { margin-top:10px; padding:12px; border-radius:12px; background:#f4f8f6; border:1px solid var(--line); font-size:14px; }
+.lc-hifi-opp-detail h4 { margin:0 0 6px; font-size:13px; }
+.lc-hifi-opp-detail ul { margin:0; padding-left:18px; color:var(--muted); }
+.lc-hifi-tag { display:inline-flex; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid var(--line); background:#f4f8f6; color:var(--muted); }
+.lc-hifi-tag.amber { background:#fbf5e9; color:#78602e; border-color:#ead9bc; }
+.lc-hifi-tag.rose { background:#f8ebe6; color:#9a4530; border-color:#e8cfc4; }
+.lc-hifi-notice { padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:#f4f8f6; margin-bottom:12px; font-size:15px; }
+.lc-hifi-notice.warn { background:#fbf5e9; border-color:#ead9bc; color:#78602e; }
+.lc-hifi-notice.info { background:#eef6f2; }
+.lc-hifi-notice strong { display:block; margin-bottom:4px; }
+.lc-hifi-notice p { margin:0 0 8px; font-size:14px; }
+.lc-hifi-thumb { width:48px !important; height:48px !important; border-radius:12px !important; object-fit:contain; background:#f4f8f6; }
+.muted { color:var(--muted); }
+.mono { font-family:ui-monospace,Consolas,monospace; font-size:13px; }
+.num { font-variant-numeric:tabular-nums; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.row.between { justify-content:space-between; }
+.mb12 { margin-bottom:12px; }
+.mb16 { margin-bottom:16px; }
+.stack-sm { display:flex; flex-direction:column; gap:7px; }
+.lc-hifi-frame-actions { display:flex; gap:8px; }
+/* Gate section hifi */
+.lc-site-v6 #market-gate-section { border-radius:18px; border:1px solid var(--line); background:#fff; padding:20px 22px; }
+.lc-site-v6 #market-gate-section h2 { font-size:22px; font-weight:700; letter-spacing:-0.02em; }
+@media (max-width:1100px) {
+  .lc-hifi-dash, .lc-hifi-stats, .lc-hifi-grid3 { grid-template-columns:1fr 1fr; }
+}
+@media (max-width:700px) {
+  .lc-hifi-dash, .lc-hifi-stats, .lc-hifi-grid3 { grid-template-columns:1fr; }
+  .lc-hifi-title { font-size:26px; }
+}
+@media(prefers-reduced-motion:reduce) { .lc-hifi-opp:hover { transform:none; } }
+@media print { .lc-site-v6 .lc-workspace { display:block; } .lc-site-v6 .lc-topbar { display:none; } }
+
+/* ── 统一侧栏：与探索台 rail 同一视觉规格（176 / 56，品牌 52，菜单 43） ── */
+.lc-preview-label {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px; border-radius: 999px; background: #f4e8c8; color: #8a6a28;
+  font-size: 11px; font-weight: 700; border: 1px solid #e6d5a8; margin: 0;
+}
+.lc-preview-label::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+
+/* 折叠态 */
+
+/* 折叠态工具提示 */
+
+/* ── V6 · 01 市场采集：采集面板与数字排版 ───────────── */
+.lc-capture-panel {
+  border: 1px solid #dcebe2;
+  border-radius: 20px;
+  background: linear-gradient(170deg, #ffffff 0%, #f8fcfa 100%);
+  padding: 18px;
+  box-shadow: 0 1px 2px rgba(16, 61, 44, 0.04), 0 18px 38px -30px rgba(16, 61, 44, 0.4);
+}
+.lc-capture-panel > div:first-child h4 { font-size: 15px; font-weight: 760; letter-spacing: -0.01em; }
+.lc-capture-panel :is(input, select) {
+  height: 40px;
+  border-radius: 10px;
+  border-color: #d9e8e0;
+  background: #fff;
+}
+.lc-capture-panel :is(input, select):focus-visible {
+  outline: 2px solid #087f68;
+  outline-offset: 1px;
+  border-color: #bfe3d2;
+}
+.lc-capture-panel .rounded-lg.border.bg-white { border-radius: 14px; border-color: #e2eee7; }
+
+/* 数字排版：表格与指标统一等宽数字，避免跳动 */
+.lc-workspace :is(td, th) { font-variant-numeric: tabular-nums; }
+.lc-workspace .lc-workspace-main :is(.font-mono, code) { font-variant-numeric: tabular-nums; }

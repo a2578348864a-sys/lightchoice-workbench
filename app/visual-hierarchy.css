@@ -1,0 +1,116 @@
+/* Impeccable refinement within the youth-green world. Presentation only.
+   State attributes mirror existing authority; they never drive business state. */
+.lc-workspace {
+  --lc-focus: #327653;
+  --lc-emphasis-line: #8bc8a7;
+}
+.lc-workspace-main { line-height: 1.65; }
+.lc-workspace .lc-heading h1 { font-size: 28px; font-weight: 720; letter-spacing: -.02em; }
+.lc-workspace .lc-heading > div > p:not(.lc-eyebrow) { font-size: 14px; color: #536b5d; }
+.lc-workspace .lc-section-heading h2 { font-size: 21px; letter-spacing: -.02em; }
+.lc-workspace :is(input, textarea) { caret-color: var(--lc-focus); }
+.lc-workspace :is(input, textarea)::placeholder { color: #64786c; opacity: 1; }
+.lc-workspace :is(button, a, input, textarea, select, summary):focus-visible {
+  outline: 2px solid var(--lc-focus); outline-offset: 3px;
+}
+.lc-workspace button[data-variant] { font-size: 14px; font-weight: 600; min-height: 36px; }
+.lc-workspace button[data-variant=primary] { border-color: #83bc99 !important; }
+.lc-workspace button[data-variant=outline] { border-color: #d5e0d8; color: #385647; }
+.lc-workspace button[data-variant]:not(:disabled):hover { transform: none; }
+.lc-workspace button[data-variant=primary]:not(:disabled):hover { border-color: #5b9c77 !important; }
+.lc-workspace button[data-variant]:not(:disabled):active { transform: translateY(1px); }
+.lc-workspace button:disabled { opacity: .58; }
+
+/* A single focal task; shortcuts and historical totals keep a quieter rhythm. */
+.lc-workspace .lc-home-hero-grid { gap: 24px; }
+.lc-workspace .lc-home-hero {
+  background: var(--lc-mint); border-color: var(--lc-emphasis-line);
+  border-radius: 16px; padding: 28px 30px; min-height: 300px;
+}
+.lc-workspace .lc-home-hero h2 {
+  color: #174d3a; font-size: 34px; line-height: 1.3; letter-spacing: -.025em;
+  font-weight: 750; margin: 14px 0; text-wrap: balance;
+}
+.lc-workspace .lc-home-hero .lc-hero-copy > p:not(.lc-eyebrow) { color: #3b6550; font-size: 14px; line-height: 1.75; }
+.lc-workspace .lc-home-hero .lc-action-subject { background: transparent; border: 0; padding: 0; margin: 18px 0; }
+.lc-workspace .lc-hero-cta {
+  min-height: 44px; padding: 10px 17px; font-size: 15px; font-weight: 700;
+  background: #fff; color: #174d3a; border-color: #83bc99; border-radius: 10px;
+}
+.lc-workspace .lc-hero-cta:hover { background: #f4fbf6; transform: none; box-shadow: none; }
+.lc-workspace .lc-compass-art img { animation: none; }
+.lc-workspace .lc-next-moves { border-radius: 16px; padding: 24px; background: #fff; }
+.lc-workspace .lc-next-moves h2 { font-size: 18px; }
+.lc-workspace .lc-next-moves small { color: #5f7567; font-size: 13px; }
+.lc-workspace .lc-metrics-strip { gap: 20px; margin: 24px 0 32px; }
+.lc-workspace .lc-metrics-strip > a { padding: 14px 16px; border: 1px solid transparent; border-bottom-color: #d0e0d5; border-radius: 12px; }
+.lc-workspace .lc-metrics-strip strong { color: #365e47; font-size: 27px; font-weight: 650; }
+.lc-workspace .lc-metrics-strip small { color: #607366; font-size: 12px; }
+.lc-workspace .lc-metrics-strip > a[data-attention=true] { background: #fff3e3; border-color: #e4c7a3; }
+.lc-workspace .lc-metrics-strip > a[data-attention=true] strong { color: #80531f; font-size: 32px; }
+.lc-workspace .lc-metrics-strip > a[data-attention=true] :is(span, small) { color: #755126; }
+.lc-workspace .lc-product-card { border-radius: 14px; }
+.lc-workspace .lc-research-queue .lc-product-card a { font-weight: 650; font-size: 14px; }
+
+/* A consistent selected state, with the incumbent navigation and actions. */
+.lc-workspace .lc-workspace-tabs > button { padding: 11px 16px; }
+.lc-workspace .lc-workspace-tabs > button strong { font-size: 15px; }
+.lc-workspace .lc-workspace-tabs > button small { font-size: 12px; color: #607467; }
+.lc-workspace .lc-workspace-tabs > button[aria-pressed=true] { background: #cdeedc; box-shadow: inset 0 -2px #5c9d76; }
+.lc-workspace .lc-section-nav button { font-weight: 600; }
+.lc-workspace .lc-market-route-state {
+  padding: 15px 18px; background: #e4f4e9; border-color: #9acaae;
+  color: #3c644d; font-size: 14px; flex-wrap: wrap;
+}
+.lc-workspace .lc-market-route-state strong { font-size: 18px; color: #174d3a; }
+.lc-workspace .lc-market-route-state button { color: #245d43; font-size: 14px; font-weight: 650; text-underline-offset: 4px; }
+.lc-workspace .lc-market-detail [data-testid=market-scope-analysis] { background: #fff; border-color: #b5d3be; }
+
+/* Human authority is visually stronger than system advice. State colors stay truthful. */
+.lc-workspace .lc-decision-hero { background: #edf5ef; border-color: #abc9b5; border-radius: 16px; }
+.lc-workspace .lc-decision-hero[data-decision=PROCEED] { background: #cdeedc; border-color: #8bc8a7; }
+.lc-workspace .lc-decision-hero:is([data-decision=PENDING],[data-decision=VALIDATE_MORE]) { background: #fff3e3; border-color: #e4c7a3; }
+.lc-workspace .lc-decision-hero[data-decision=DROP] { background: #faeee9; border-color: #dcbfb4; }
+.lc-workspace .lc-decision-hero h2 { font-size: 36px; letter-spacing: -.025em; text-wrap: balance; }
+.lc-workspace .lc-decision-hero:is([data-decision=PENDING],[data-decision=VALIDATE_MORE]) h2 { color: #785023; }
+.lc-workspace .lc-decision-hero[data-decision=DROP] h2 { color: #884a38; }
+.lc-workspace .lc-hero-head { font-size: 13px; color: #3e6450; letter-spacing: 0; }
+.lc-workspace .lc-hero-state { color: #3c634e; font-size: 12px; background: #fff; }
+.lc-workspace .lc-hero-desc { font-size: 14px; line-height: 1.8; color: #486653; }
+.lc-workspace .lc-hero-foot { font-size: 12px; color: #486653; }
+.lc-workspace .lc-hero-foot button { font-size: 14px; font-weight: 650; min-height: 38px; }
+.lc-workspace .lc-suggestion-card { background: #fbfafc; border-color: #dedbe6; border-radius: 16px; }
+.lc-workspace .lc-suggestion-card h2 { font-size: 22px; }
+.lc-workspace .lc-suggestion-text { font-size: 14px; line-height: 1.8; color: #655c75; }
+.lc-workspace .lc-suggestion-counts li { font-size: 12px; color: #655777; }
+.lc-workspace .lc-suggestion-note { font-size: 13px; color: #795722; }
+.lc-workspace .lc-suggestion-links :is(a,button) { font-size: 14px; font-weight: 600; }
+.lc-workspace .lc-threads-head h2 { font-size: 18px; }
+.lc-workspace .lc-thread-index { font-size: 12px; letter-spacing: 0; color: #59705f; }
+.lc-workspace .lc-thread-card strong { font-size: 15px; }
+.lc-workspace .lc-thread-card :is(p,button) { font-size: 13px; line-height: 1.75; color: #506b57; }
+
+/* Preserve workbook space; emphasize the save status and its actual blocker. */
+.lc-workspace .lc-workbook-pilot .lc-brief-mast { background: #edf6f0; border-color: #d3e4d8; }
+.lc-workspace .lc-workbook-pilot .lc-brief-bar { background: #e4f4e9; border-color: #91bfa2; box-shadow: none; }
+.lc-workspace .lc-workbook-pilot .lc-brief-bar[data-dirty=true] { background: #fff3e3; border-color: #d7b581; }
+.lc-workspace .lc-workbook-pilot .lc-brief-bar:is([data-save-state=unconfirmed],[data-save-state=conflict],[data-save-state=error]) { background: #fff3e3; border-color: #c69a60; }
+.lc-workspace .lc-workbook-pilot .lc-brief-bar-state { font-weight: 650; color: #385b49; font-size: 14px; }
+.lc-workspace .lc-workbook-pilot .lc-brief-bar[data-dirty=true] .lc-brief-bar-state { color: #775025; }
+.lc-workspace .lc-workbook-pilot .lc-workbook-review { background: #fff; border-color: #d7e2da; }
+.lc-workspace .lc-workbook-pilot .lc-workbook-review h2 { color: #314f3e; font-weight: 700; }
+.lc-workspace .lc-workbook-pilot .lc-review-warn { background: #fff3e3; border-color: #e4c7a3; color: #795222; font-weight: 600; font-size: 14px; padding: 12px; }
+.lc-workspace .lc-workbook-pilot .lc-field-label { color: #2d513c; font-weight: 650; }
+.lc-workspace .lc-workbook-pilot :is(.lc-input,.lc-textarea):focus { border-color: #80b594; background: #fff; }
+
+@media (max-width: 1200px) {
+  .lc-workspace .lc-home-hero h2 { font-size: 30px; }
+  .lc-workspace .lc-home-hero { padding: 24px; }
+  .lc-workspace .lc-hero-foot { align-items: flex-start; flex-direction: column; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lc-workspace :is(.lc-hero-cta,button[data-variant]) { transition: none; }
+}
+@media print {
+  .lc-workspace .lc-workbook-pilot .lc-brief-bar { position: static; }
+}

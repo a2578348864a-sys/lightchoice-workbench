@@ -1,0 +1,408 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model ListingCopyHistory {
+  id               String   @id @default(cuid())
+  productId        String?
+  productName      String
+  title            String
+  bulletPoints     String
+  description      String
+  shortDescription String
+  keywords         String
+  longTailKeywords String
+  faq              String
+  packingList      String
+  afterSales       String
+  notes            String
+  sourceInput      String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([createdAt])
+  @@index([productName])
+}
+
+model ViralAnalysisRecord {
+  id             String    @id @default(cuid())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  type           String    @default("viral")
+  decisionStatus String    @default("pending")
+  title          String?
+  platform       String
+  productUrl     String?
+  materialText   String
+  source         String
+  score          Int
+  level          String
+  oneLineSummary String
+  resultJson     String
+  archivedAt     DateTime?
+
+  @@index([type, createdAt])
+  @@index([decisionStatus, createdAt])
+  @@index([source])
+  @@index([platform])
+}
+
+model OpportunityCandidate {
+  id                       String            @id @default(cuid())
+  name                     String
+  rawInput                 String            @default("")
+  link                     String?
+  score                    Int               @default(0)
+  source                   String            @default("机会雷达")
+  keyword                  String            @default("")
+  riskLevel                String            @default("")
+  riskLabel                String            @default("")
+  summaryLabel             String            @default("")
+  status                   String            @default("pending")
+  sourceMetaJson           String            @default("{}")
+  analysisJson             String            @default("{}")
+  convertedTaskId          String?
+  originProductBatchItemId String?           @unique
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @default(now()) @updatedAt
+  lastActionAt             DateTime?
+  archivedAt               DateTime?
+  originProductBatchItem   ProductBatchItem? @relation(fields: [originProductBatchItemId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([status, updatedAt])
+  @@index([score])
+  @@index([createdAt])
+  @@index([name])
+}
+
+model ProductBatch {
+  id                            String                      @id @default(cuid())
+  ownerSubject                  String
+  batchName                     String
+  marketplace                   String
+  currency                      String
+  reportType                    String
+  query                         String?
+  category                      String?
+  priceMinCents                 Int?
+  priceMaxCents                 Int?
+  briefHash                     String
+  sourceFileName                String
+  sourceFileSha256              String
+  normalizedBusinessHash        String?
+  snapshotHash                  String?
+  manifestHash                  String?
+  itemCount                     Int?
+  acceptedCount                 Int?
+  quarantinedCount              Int?
+  dataQualityStatus             String                      @default("pending")
+  batchStatus                   String                      @default("processing")
+  sellerSpriteDisclaimerVersion String?
+  normalizedSnapshotJson        String?
+  manifestJson                  String?
+  qualitySummaryJson            String                      @default("{}")
+  errorJson                     String?
+  dedupeKey                     String
+  importedAt                    DateTime?
+  createdAt                     DateTime                    @default(now())
+  updatedAt                     DateTime                    @default(now()) @updatedAt
+  archivedAt                    DateTime?
+  items                         ProductBatchItem[]
+  discoverySelections           ProductDiscoverySelection[]
+
+  @@unique([ownerSubject, dedupeKey])
+  @@index([ownerSubject, batchStatus, importedAt])
+  @@index([ownerSubject, createdAt])
+  @@index([ownerSubject, archivedAt, updatedAt])
+}
+
+model ProductBatchItem {
+  id                       String                @id @default(cuid())
+  batchId                  String
+  ordinal                  Int
+  productKey               String
+  asin                     String?
+  parentAsin               String?
+  itemIdentityHash         String
+  itemHash                 String
+  evidenceHash             String
+  normalizedProductJson    String
+  occurrenceProjectionJson String
+  familyProjectionJson     String
+  rankingJson              String
+  provisionalDisposition   String
+  researchPriority         String
+  evidenceStatus           String
+  promotionEligible        Boolean               @default(false)
+  imageSnapshotJson        String                @default("{\"status\":\"not_cached\"}")
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @default(now()) @updatedAt
+  archivedAt               DateTime?
+  batch                    ProductBatch          @relation(fields: [batchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  originCandidate          OpportunityCandidate?
+
+  @@unique([batchId, productKey])
+  @@unique([batchId, ordinal])
+  @@unique([batchId, itemIdentityHash])
+  @@index([batchId, evidenceStatus])
+  @@index([batchId, archivedAt, createdAt])
+}
+
+model ProductDiscoverySelection {
+  ownerSubject               String        @id
+  activeProductBatchId       String?
+  activeLegacyRegistrationId String?
+  updatedAt                  DateTime      @default(now()) @updatedAt
+  activeProductBatch         ProductBatch? @relation(fields: [activeProductBatchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+}
+
+model V4ResearchRun {
+  id                         String   @id @default(cuid())
+  candidateId                String
+  ownerScope                 String
+  sandboxId                  String?
+  mode                       String   @default("local_live")
+  graphVersion               String   @default("research-graph.v4.1")
+  status                     String   @default("draft")
+  currentNode                String   @default("load_context")
+  revision                   Int      @default(0)
+  planRevision               Int      @default(0)
+  automaticPlanRevisionCount Int      @default(0)
+  stateJson                  String
+  eventsJson                 String   @default("[]")
+  reportJson                 String?
+  commercialJson             String?
+  contentJson                String?
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  @@index([candidateId])
+  @@index([ownerScope, sandboxId])
+  @@index([status, updatedAt])
+}
+
+model V4SideEffectJournal {
+  id             String   @id @default(cuid())
+  runId          String
+  idempotencyKey String
+  inputHash      String
+  action         String
+  status         String   @default("recorded")
+  detailJson     String   @default("{}")
+  createdAt      DateTime @default(now())
+
+  @@unique([runId, idempotencyKey])
+  @@index([runId])
+}
+
+model V4FactRecord {
+  id                 String   @id @default(cuid())
+  runId              String
+  candidateId        String
+  offerIdentity      String
+  variantKey         String
+  field              String
+  value              String
+  status             String   @default("confirmed")
+  confirmationMethod String?
+  claimRefsJson      String   @default("[]")
+  documentRefsJson   String   @default("[]")
+  actor              String
+  revision           Int
+  revokedByRevision  Int?
+  detailJson         String   @default("{}")
+  createdAt          DateTime @default(now())
+
+  @@unique([runId, offerIdentity, variantKey, field, revision])
+  @@index([runId, offerIdentity, variantKey, field])
+  @@index([runId, revision])
+}
+
+/// Product Development V1 — Phase 1：MarketScan 是业务研究对象（编组），不是来源事实。
+/// 它只保存：Niche 定义、样本定义、样本事实版本快照、确定性指标结果。
+/// 不新增 NicheOpportunity / MarketSample 独立表 / RepresentativeSet / ProductConcept / OpportunityScore。
+/// JSON 类数据一律用 String 承载（SQLite 不支持 Prisma scalar list）。
+model MarketScan {
+  id                   String    @id @default(cuid())
+  ownerScope           String
+  scanName             String
+  marketplace          String
+  nicheKind            String
+  nicheDefinitionJson  String
+  sampleDefinitionJson String
+  sampleSnapshotJson   String
+  metricsJson          String
+  sampleCount          Int
+  metricsVersion       String
+  sampleHash           String
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @default(now()) @updatedAt
+  archivedAt           DateTime?
+
+  @@index([ownerScope, createdAt])
+  @@index([ownerScope, sampleHash])
+  @@index([ownerScope, archivedAt, updatedAt])
+}
+
+/// Product Development V1 — Phase 2：市场机会编组层。
+/// 只关联已经存在的 MarketScan，不复制商品事实，不承载统一机会分。
+model NicheOpportunity {
+  id                     String    @id @default(cuid())
+  ownerScope             String
+  schemaVersion          String    @default("market-opportunity.v1")
+  name                   String
+  marketplace            String
+  nicheKind              String
+  nicheDefinitionJson    String
+  latestMarketScanId     String
+  scanRefsJson           String
+  analysisSnapshotJson   String
+  aiInterpretationJson   String?
+  humanDecisionJson      String?
+  larkSyncJson           String    @default("{\"status\":\"NOT_SYNCED\"}")
+  representativeSetJson  String    @default("{\"schemaVersion\":\"market-opportunity-representatives.v1\",\"revision\":0,\"items\":[]}")
+  conceptSnapshotJson    String?
+  conceptProjectSyncJson String    @default("{\"status\":\"NOT_SYNCED\"}")
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @default(now()) @updatedAt
+  archivedAt             DateTime?
+
+  @@index([ownerScope, updatedAt])
+  @@index([ownerScope, createdAt])
+  @@index([ownerScope, latestMarketScanId])
+}
+
+/// V5 技术性幂等收据：只保存有限请求摘要，不承载业务事实、Prompt、凭证或事件流。
+model V5OperationReceipt {
+  id             String    @id @default(cuid())
+  actorScope     String
+  operation      String
+  resourceKey    String
+  idempotencyKey String
+  requestHash    String
+  status         String    @default("processing")
+  responseJson   String?
+  errorCode      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  expiresAt      DateTime?
+
+  @@unique([actorScope, operation, resourceKey, idempotencyKey])
+  @@index([actorScope, operation, resourceKey])
+}
+
+/// V5 Feishu 单向投影状态；远端记录不是本地业务事实。
+model V5FeishuSyncMetadata {
+  id             String    @id @default(cuid())
+  actorScope     String
+  resourceType   String
+  resourceId     String
+  tableName      String
+  businessKey    String
+  projectionHash String
+  state          String    @default("NOT_SYNCED")
+  remoteRecordId String?
+  attempt        Int       @default(0)
+  lastAttemptAt  DateTime?
+  lastSuccessAt  DateTime?
+  nextRetryAt    DateTime?
+  errorCode      String?
+  errorMessage   String?
+  retryable      Boolean   @default(false)
+  idempotencyKey String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @default(now()) @updatedAt
+
+  @@unique([actorScope, tableName, businessKey])
+  @@index([actorScope, resourceType, resourceId])
+  @@index([state, nextRetryAt])
+}
+
+/// V5 MarketSample 行级生命周期元数据；不复制或修改 MarketScan 快照/事实。
+model V5MarketSampleLifecycle {
+  id              String    @id @default(cuid())
+  ownerScope      String
+  scanId          String
+  marketSampleKey String
+  archivedAt      DateTime?
+  // P3 人工研究范围确认（全部可空；NULL scopeStatus = 从未确认）
+  // 与 archivedAt 语义严格分离：archivedAt 是「是否参与市场统计」，scopeStatus 是「是否符合本次研究范围」。
+  scopeStatus       String?   // IN_SCOPE | OUT_OF_SCOPE | REVOKED
+  scopeReason       String?
+  scopeSampleHash   String?   // 确认时的 MarketScan.sampleHash
+  scopeNicheHash    String?   // 确认时的研究目标哈希（nicheDefinition），目标变更即失效
+  scopeConfirmedAt  DateTime?
+  scopeConfirmedBy  String?
+  scopeRevision     Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @default(now()) @updatedAt
+
+  @@unique([ownerScope, marketSampleKey])
+  @@index([ownerScope, scanId, archivedAt, updatedAt])
+  @@index([ownerScope, scanId, scopeStatus])
+}
+
+model AgentEvent {
+  id           String   @id @default(cuid())
+  createdAt    DateTime @default(now())
+  taskId       String?
+  runId        String?
+  module       String
+  event        String
+  level        String
+  message      String
+  metadataJson String   @default("{}")
+
+  @@index([taskId, createdAt])
+  @@index([module, createdAt])
+  @@index([level, createdAt])
+  @@index([createdAt])
+  @@map("agent_events")
+}
+
+/// Continuous Monitoring V1 stores configuration and run references only;
+/// Capture V3 EvidenceStore remains the only evidence authority.
+model WatchTarget {
+  id                     String          @id
+  subjectKey             String
+  captureModule          String
+  enabled                Boolean         @default(true)
+  schedule               String
+  timezone               String
+  policyJson             String
+  lastRunAt              DateTime?
+  lastMeaningfulChangeAt DateTime?
+  nextRunAt              DateTime
+  activeRunId            String?
+  createdAt              DateTime
+  updatedAt              DateTime
+  runs                   MonitoringRun[]
+
+  @@unique([subjectKey, captureModule])
+  @@index([enabled, nextRunAt])
+}
+
+/// Append-only operational history with immutable references into Capture V3.
+model MonitoringRun {
+  id                      String      @id
+  watchTargetId           String
+  triggerType             String
+  status                  String
+  outcome                 String?
+  startedAt               DateTime
+  finishedAt              DateTime?
+  previousEvidenceRefJson String?
+  currentEvidenceRefJson  String?
+  changeSummaryJson       String?
+  errorCode               String?
+  errorMessage            String?
+  aiExplanationJson       String?
+  watchTarget             WatchTarget @relation(fields: [watchTargetId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([watchTargetId, startedAt])
+}

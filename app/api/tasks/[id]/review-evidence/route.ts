@@ -1,0 +1,774 @@
+/**
+ * V3.4 — Review Evidence API（review-evidence.v1 + voc-analysis.v1）
+ * GET  /api/tasks/[id]/review-evidence  读取 dataset + vocAnalysis + storageVersion + taskAsin
+ * POST /api/tasks/[id]/review-evidence  action=import：人工导入 Review 样本（规范化/去重/bounded/实体绑定）
+ * POST /api/tasks/[id]/review-evidence  action=analyze：AI VOC 分析（quota gate + run trace + evidenceRefs 硬门禁）
+ * POST /api/tasks/[id]/review-evidence  action=clear：清空 dataset（同步清除旧分析）
+ * POST /api/tasks/[id]/review-evidence  action=collect：半自动采集 Preview（隔离浏览器提取 Top Reviews 片段，不写入）
+ * POST /api/tasks/[id]/review-evidence  action=collect-confirm：人工确认后把 Preview 选中项写入（browser 绑定 + 去重）
+ *
+ * 安全：requireAuthenticated / subject binding / task binding / expectedStorageVersion /
+ * schema validation / payload limit / namespace writer ownership；不开放任意 JSON 写入。
+ * collect-confirm 的字段值全部由服务端从 Preview 缓存重建（客户端只传 previewId + 选中索引），
+ * 与 browser-evidence save 的 Preview 取回机制一致。
+ */
+import { createHash, randomUUID } from "node:crypto";
+import { NextRequest, NextResponse } from "next/server";
+import { consumeDemoAiCalls, ensureDemoAiQuota, requireAuthenticated, requireOwnerOnly } from "@/lib/server/demoGuard";
+import { isSandboxTaskId } from "@/lib/server/demoSandbox";
+import {
+  clearReviews,
+  getReviewEvidence,
+  importReviews,
+  readReviewEvidenceSnapshot,
+  ReviewEvidenceError,
+  REVIEW_DATASET_MAX_REVIEWS,
+  REVIEW_DATASET_MAX_PER_ASIN,
+  buildReviewDuplicateKey,
+  buildReviewContentHash,
+  type ReviewEvidenceV1,
+  type ReviewImportInput,
+  type ReviewSourceProductRole,
+} from "@/lib/server/reviewEvidence";
+import {
+  getVocAnalysis,
+  VocAnalysisError,
+  type VocAnalysisV1,
+} from "@/lib/server/vocAnalysis";
+import {
+  REVIEW_COLLECTOR_VERSION,
+  ReviewCollectorError,
+  assertReviewCollectRequest,
+  createReviewCollectPreview,
+  storeReviewCollectPreview,
+  peekReviewCollectPreview,
+  consumeReviewCollectPreview,
+  findPendingReviewCollectPreview,
+  isReusableReviewCollectPreview,
+  reviewCollectSubjectKey,
+  buildSnippetPreviewDedupeKey,
+  getPendingReviewCollectPreviewDto,
+  type PendingReviewCollectPreviewDto,
+} from "@/lib/server/reviewCollector";
+import { readBrowserEvidenceTaskAsin } from "@/lib/server/browserEvidence";
+import type { AccessContext } from "@/lib/server/accessPassword";
+import { analyzeVocForResearchTask, CustomerVoiceServiceError } from "@/lib/server/customerVoiceService";
+import {
+  acquisitionGateError,
+  REVIEW_LOCAL_ENV_REQUIRED_MESSAGE,
+  browserUnavailableMessage,
+  resolveBrowserAcquisitionCapability,
+  type AcquisitionCapability,
+} from "@/lib/server/acquisitionCapability";
+import {
+  DEMO_ACQUISITION_EVIDENCE_ID,
+  DEMO_SAMPLE_VOC_ID,
+  DEMO_SAMPLE_VERSION,
+  buildDemoReviewCollectPageResults,
+  buildDemoReviewCollectPreviewItems,
+} from "@/lib/server/demoAcquisitionSamples";
+import {
+  captureEvidenceAttachmentThroughGateway,
+  CaptureGatewayError,
+} from "@/lib/sourceLayer/server/captureGateway";
+import { captureV3ModuleEvidence } from "@/lib/sourceLayer/v3ModuleEvidence";
+import type { SourceEvidenceRef } from "@/lib/sourceLayer/evidenceRefs";
+import { collectAmazonReviewsWithPlaywright } from "@/lib/server/captureRecipeBrowser";
+import type { AmazonSessionFailureReport } from "@/lib/server/amazonUsSessionEnvironment";
+import { newTraceId } from "@/lib/sourceLayer/diagnostics";
+
+export const runtime = "nodejs";
+
+type StorageVersion = { resultJsonHash: string; updatedAt: string };
+type ApiResponse =
+  | {
+      ok: true;
+      data: {
+        evidence: ReviewEvidenceV1 | null;
+        analysis: VocAnalysisV1 | null;
+        storageVersion: StorageVersion;
+        taskAsin: string | null;
+        capability: AcquisitionCapability;
+        pendingPreview?: PendingReviewCollectPreviewDto | null;
+      };
+    }
+  | { ok: true; data: { outcome: { kind: string; importedCount: number; duplicateCount: number; rejectedCount: number }; evidence: ReviewEvidenceV1; storageVersion: StorageVersion } }
+  | { ok: true; data: { analysis: VocAnalysisV1; unverified: number; gateResult: string; storageVersion: StorageVersion; demo?: boolean } }
+  | { ok: true; data: { cleared: boolean; storageVersion: StorageVersion } }
+  | {
+      ok: true;
+      data: {
+        preview: {
+          previewId: string;
+          items: Array<{
+            asin: string;
+            role: ReviewSourceProductRole;
+            rating: number | null;
+            date: string | null;
+            title: string;
+            duplicate: boolean;
+          }>;
+          pageResults: Array<{ asin: string; status: string; note: string | null; extractedCount: number }>;
+          capturedAt: string;
+        };
+        storageVersion: StorageVersion;
+        demo?: boolean;
+        reused?: boolean;
+        warning?: string | null;
+      };
+    }
+  | { ok: true; data: { confirmed: boolean; storageVersion: StorageVersion } }
+  | { ok: false; error: { code: string; message: string; sessionDiagnostics?: AmazonSessionFailureReport | null } };
+
+function jsonResponse(body: ApiResponse, status = 200) {
+  return NextResponse.json(body, { status });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function toStorageVersion(snapshot: { resultJson: string; updatedAt: Date | string }): StorageVersion {
+  return {
+    resultJsonHash: createHash("sha256").update(snapshot.resultJson, "utf8").digest("hex"),
+    updatedAt: snapshot.updatedAt instanceof Date
+      ? snapshot.updatedAt.toISOString()
+      : String(snapshot.updatedAt),
+  };
+}
+
+function parseStorageVersionInput(value: unknown): StorageVersion | null {
+  if (!isRecord(value)) return null;
+  const hash = asString(value.resultJsonHash);
+  const updatedAt = asString(value.updatedAt);
+  if (!/^[a-f0-9]{64}$/.test(hash) || !updatedAt) return null;
+  return { resultJsonHash: hash, updatedAt };
+}
+
+function parseImportInputs(value: unknown): ReviewImportInput[] | null {
+  if (!isRecord(value) || !Array.isArray(value.reviews)) return null;
+  if (value.reviews.length === 0 || value.reviews.length > REVIEW_DATASET_MAX_REVIEWS) return null;
+  const parsed: ReviewImportInput[] = [];
+  for (const raw of value.reviews) {
+    if (!isRecord(raw)) return null;
+    const role = raw.sourceProductRole;
+    if (role !== "current_candidate" && role !== "competitor") return null;
+    const rating = raw.rating === null || raw.rating === undefined ? null : raw.rating;
+    if (rating !== null && (typeof rating !== "number" || !Number.isInteger(rating) || rating < 1 || rating > 5)) return null;
+    parsed.push({
+      asin: asString(raw.asin),
+      sourceProductRole: role as ReviewSourceProductRole,
+      reviewText: typeof raw.reviewText === "string" ? raw.reviewText : "",
+      rating: rating as number | null,
+      reviewTitle: raw.reviewTitle === undefined ? undefined : asString(raw.reviewTitle, "") || undefined,
+      reviewId: raw.reviewId === undefined ? undefined : asString(raw.reviewId, "") || undefined,
+      reviewDate: raw.reviewDate === undefined ? undefined : asString(raw.reviewDate, "") || undefined,
+      verifiedPurchase: raw.verifiedPurchase === null || raw.verifiedPurchase === undefined ? undefined : raw.verifiedPurchase === true,
+      locale: raw.locale === undefined ? undefined : asString(raw.locale, "") || undefined,
+      language: raw.language === undefined ? undefined : asString(raw.language, "") || undefined,
+      sourceUrl: raw.sourceUrl === undefined ? undefined : asString(raw.sourceUrl, "") || undefined,
+      sourceRef: raw.sourceRef === undefined ? undefined : asString(raw.sourceRef, "") || undefined,
+      bindingNote: raw.bindingNote === undefined ? undefined : asString(raw.bindingNote, "") || undefined,
+    });
+  }
+  return parsed;
+}
+
+async function resolveContext(
+  request: NextRequest,
+  taskId: string,
+  bodyRecord?: Record<string, unknown>,
+): Promise<{ ok: true; context: AccessContext } | { ok: false; response: NextResponse }> {
+  if (isSandboxTaskId(taskId)) {
+    const auth = requireAuthenticated(request, bodyRecord);
+    if (!auth.ok) {
+      return { ok: false, response: NextResponse.json({ ok: false, error: { code: auth.code, message: auth.message } }, { status: auth.status }) };
+    }
+    if (auth.context.mode !== "demo") {
+      return { ok: false, response: jsonResponse({ ok: false, error: { code: "not_found", message: "未找到该任务。" } }, 404) };
+    }
+    return { ok: true, context: auth.context };
+  }
+  const auth = requireOwnerOnly(request, bodyRecord);
+  if (!auth.ok) {
+    return { ok: false, response: NextResponse.json({ ok: false, error: { code: auth.code, message: auth.message } }, { status: auth.status }) };
+  }
+  return { ok: true, context: auth.context };
+}
+
+async function getId(context: { params: Promise<{ id: string }> }): Promise<string | null> {
+  try {
+    const { id } = await context.params;
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+function errorResponse(error: unknown): NextResponse {
+  if (error instanceof ReviewEvidenceError || error instanceof VocAnalysisError || error instanceof ReviewCollectorError) {
+    return jsonResponse({ ok: false, error: { code: error.code, message: error.message } }, error.status);
+  }
+  if (error instanceof CaptureGatewayError) {
+    return jsonResponse({ ok: false, error: { code: `source_${error.code}`, message: error.message } }, 409);
+  }
+  return jsonResponse({ ok: false, error: { code: "server_error", message: "服务器错误，请稍后重试。" } }, 500);
+}
+
+export async function GET(
+  request: NextRequest,
+  context: { params: Promise<{ id: string }> },
+) {
+  const id = await getId(context);
+  if (!id) return jsonResponse({ ok: false, error: { code: "invalid_id", message: "缺少有效 task id。" } }, 400);
+  const resolved = await resolveContext(request, id);
+  if (!resolved.ok) return resolved.response;
+  try {
+    const [snapshot, evidence, analysis, taskAsin] = await Promise.all([
+      readReviewEvidenceSnapshot(resolved.context, id),
+      getReviewEvidence(resolved.context, id),
+      getVocAnalysis(resolved.context, id),
+      readBrowserEvidenceTaskAsin(resolved.context, id),
+    ]);
+    const pendingPreview = getPendingReviewCollectPreviewDto({
+      subjectKey: reviewCollectSubjectKey(resolved.context),
+      taskId: id,
+      asin: taskAsin ?? undefined,
+      currentDatasetReviews: evidence?.dataset.reviews,
+    });
+    return jsonResponse({
+      ok: true,
+      data: {
+        evidence,
+        analysis,
+        storageVersion: toStorageVersion(snapshot),
+        taskAsin,
+        capability: resolveBrowserAcquisitionCapability(),
+        pendingPreview,
+      },
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+export async function POST(
+  request: NextRequest,
+  context: { params: Promise<{ id: string }> },
+) {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ ok: false, error: { code: "invalid_json", message: "请求体不是合法 JSON。" } }, 400);
+  }
+  const id = await getId(context);
+  if (!id) return jsonResponse({ ok: false, error: { code: "invalid_id", message: "缺少有效 task id。" } }, 400);
+  const bodyRecord = isRecord(body) ? body : {};
+  const resolved = await resolveContext(request, id, bodyRecord);
+  if (!resolved.ok) return resolved.response;
+
+  const action = asString(bodyRecord.action);
+  if (action === "import") return importAction(resolved.context, id, bodyRecord);
+  if (action === "analyze") return analyzeAction(resolved.context, id, bodyRecord);
+  if (action === "clear") return clearAction(resolved.context, id, bodyRecord);
+  // Owner 的正式评论采集固定走 Playwright → Preview；旧 collect 仅保留
+  // Visitor demo 回放，避免任何 Owner 外部采集绕过新采集层。
+  if (action === "collect") {
+    return resolved.context.mode === "owner"
+      ? collectPlaywrightAction(resolved.context, id, bodyRecord)
+      : collectAction(resolved.context, id, bodyRecord);
+  }
+  if (action === "collect_playwright") return collectPlaywrightAction(resolved.context, id, bodyRecord);
+  if (action === "collect-confirm") return collectConfirmAction(resolved.context, id, bodyRecord);
+  return jsonResponse({ ok: false, error: { code: "invalid_action", message: "缺少或非法的 action（import / analyze / clear / collect / collect_playwright / collect-confirm）。" } }, 400);
+}
+
+/** 轮 12：从任务 resultJson 解析权威 ASIN（browserEvidence.targetAsin 或 candidateAnalysisContext.facts.asin）。 */
+function authoritativeReviewAsin(resultJson: string): string | null {
+  try {
+    const parsed = JSON.parse(resultJson) as Record<string, unknown>;
+    const browserEvidence = parsed.browserEvidence as Record<string, unknown> | undefined;
+    if (browserEvidence && typeof browserEvidence.targetAsin === "string" && /^[A-Z0-9]{10}$/i.test(browserEvidence.targetAsin)) return browserEvidence.targetAsin.toUpperCase();
+    const cac = parsed.candidateAnalysisContext as Record<string, unknown> | undefined;
+    const facts = cac ? cac.facts as Record<string, unknown> | undefined : undefined;
+    if (facts && typeof facts.asin === "string" && /^[A-Z0-9]{10}$/i.test(facts.asin)) return facts.asin.toUpperCase();
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Owner 正式路径把原始 Review 先写入同一 Source Layer attachment，再把只读引用
+ * 写入任务 resultJson。演示主体保留旧回放行为，不伪造本地 Source Layer 数据。
+ */
+async function captureReviewSourceRefs(
+  context: AccessContext,
+  taskId: string,
+  reviews: readonly ReviewImportInput[],
+  source: "manual" | "amazon_dom",
+): Promise<SourceEvidenceRef[]> {
+  if (context.mode !== "owner") return [];
+  const refs: SourceEvidenceRef[] = [];
+  const asins = [...new Set(reviews.map((review) => review.asin.trim().toUpperCase()))];
+  for (const asin of asins) {
+    const sourceReviews = reviews.filter((review) => review.asin.trim().toUpperCase() === asin);
+    const captured = await captureEvidenceAttachmentThroughGateway({
+      context,
+      subjectKey: `amazon:US:${asin}`,
+      source,
+      kind: "review_evidence",
+      sourceFingerprint: `review:${taskId}:${asin}`,
+      payload: {
+        schema: "review-evidence-attachment.v1",
+        asin,
+        reviews: sourceReviews,
+      },
+    });
+    if (source === "amazon_dom") {
+      await captureV3ModuleEvidence({
+        context,
+        sourceType: "amazon_dom",
+        moduleEvidence: {
+          module: "review_voc",
+          subjectKey: `amazon:US:${asin}`,
+          marketplace: "US",
+          capturedAt: new Date().toISOString(),
+          provider: "Amazon",
+          sourceSurface: "Amazon public Top Reviews DOM",
+          sourceUrl: sourceReviews[0]?.sourceUrl ?? null,
+          acquisitionMode: "DOM_DIRECT",
+          metricNature: "source_observed",
+          status: "AVAILABLE_WITH_LIMITATION",
+          limitations: ["public_top_reviews_only", "review_full_pagination_not_attempted"],
+          identity: { asin },
+          data: {
+            reviewCount: sourceReviews.length,
+            reviews: sourceReviews,
+          },
+          evidenceOnly: true,
+        },
+      });
+    }
+    // 商品级评论证据必须有真实商品 Evidence 引用；缺失即 fail-closed，不写入半成品引用。
+    if (!captured.sourceEvidenceRef) {
+      throw new Error("REVIEW_EVIDENCE_SOURCE_REF_MISSING");
+    }
+    refs.push(captured.sourceEvidenceRef);
+  }
+  return refs;
+}
+async function importAction(
+  context: AccessContext,
+  taskId: string,
+  bodyRecord: Record<string, unknown>,
+): Promise<NextResponse> {
+  const expectedStorageVersion = parseStorageVersionInput(bodyRecord.expectedStorageVersion);
+  if (expectedStorageVersion === null) {
+    return jsonResponse({
+      ok: false,
+      error: { code: "storage_version_required", message: "内容刚在其他位置更新，请刷新后重试。" },
+    }, 400);
+  }
+  const inputs = parseImportInputs(bodyRecord);
+  if (inputs === null) {
+    return jsonResponse({
+      ok: false,
+      error: {
+        code: "invalid_import_payload",
+        message: `导入数据格式无效：需要 reviews 数组（每条含 asin/sourceProductRole/reviewText/rating），单次不超过 ${REVIEW_DATASET_MAX_REVIEWS} 条。`,
+      },
+    }, 400);
+  }
+  // 轮 12：当前商品评论的 ASIN 必须等于任务权威 ASIN（服务端身份绑定；不一致零写入 fail-closed）。
+  try {
+    const snapshotForIdentity = await readReviewEvidenceSnapshot(context, taskId);
+    const authoritativeAsin = authoritativeReviewAsin(snapshotForIdentity.resultJson)
+      ?? (await readBrowserEvidenceTaskAsin(context, taskId));
+    if (authoritativeAsin) {
+      const mismatch = inputs.find((item) => item.sourceProductRole === "current_candidate"
+        && item.asin.trim().toUpperCase() !== authoritativeAsin.toUpperCase());
+      if (mismatch) {
+        return jsonResponse({ ok: false, error: { code: "current_candidate_asin_mismatch", message: "当前商品的 Amazon 商品编号与任务绑定身份不一致，已拒绝导入（未写入任何数据）。" } }, 409);
+      }
+    }
+  } catch (error) {
+    const code = error instanceof Error && /authoritative|not_found/i.test(error.message) ? "current_candidate_identity_unavailable" : "server_error";
+    return jsonResponse({ ok: false, error: { code, message: "无法确认当前商品身份，已拒绝导入。" } }, code === "server_error" ? 500 : 409);
+  }
+  try {
+    const sourceEvidenceRefs = await captureReviewSourceRefs(context, taskId, inputs, "manual");
+    const outcome = await importReviews({ context, taskId, expectedStorageVersion, reviews: inputs, sourceEvidenceRefs });
+    const snapshotAfter = await readReviewEvidenceSnapshot(context, taskId);
+    return jsonResponse({
+      ok: true,
+      data: {
+        outcome: {
+          kind: outcome.kind,
+          importedCount: outcome.importedCount,
+          duplicateCount: outcome.duplicateCount,
+          rejectedCount: outcome.rejectedCount,
+        },
+        evidence: outcome.evidence,
+        storageVersion: toStorageVersion(snapshotAfter),
+      },
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function analyzeAction(
+  context: AccessContext,
+  taskId: string,
+  bodyRecord: Record<string, unknown>,
+): Promise<NextResponse> {
+  const expectedStorageVersion = parseStorageVersionInput(bodyRecord.expectedStorageVersion);
+  if (expectedStorageVersion === null) {
+    return jsonResponse({
+      ok: false,
+      error: { code: "storage_version_required", message: "内容刚在其他位置更新，请刷新后重试。" },
+    }, 400);
+  }
+  // Visitor AI 配额门禁（Owner 直通）；VOC 不新增独立额度。
+  // Demo 模式不回放预置结果，也不调用 Provider；Analyze 仅开放给本地 Owner canonical Evidence。
+  if (context.mode === "demo") {
+    return jsonResponse({
+      ok: false,
+      error: {
+        code: "VOC_ANALYSIS_REQUIRES_OWNER_CANONICAL_EVIDENCE",
+        message: "演示任务不回放预置 VOC 结果，也不调用 AI Provider；请在本地 Owner 任务中基于 canonical 买家声音生成分析。",
+      },
+    }, 503);
+  }
+  const quota = ensureDemoAiQuota(context, 1);
+  if (!quota.ok) {
+    return jsonResponse({ ok: false, error: { code: quota.code, message: quota.message } }, quota.status);
+  }
+  try {
+    const result = await analyzeVocForResearchTask({ context, taskId, expectedStorageVersion });
+    consumeDemoAiCalls(context, 1);
+    const snapshotAfter = await readReviewEvidenceSnapshot(context, taskId);
+    return jsonResponse({
+      ok: true,
+      data: {
+        analysis: result.analysis,
+        unverified: result.unverifiedCount,
+        gateResult: result.gateResult,
+        storageVersion: toStorageVersion(snapshotAfter),
+      },
+    });
+  } catch (error) {
+    if (error instanceof CustomerVoiceServiceError) {
+      return jsonResponse({ ok: false, error: { code: error.code, message: error.message } }, error.status);
+    }
+    return errorResponse(error);
+  }
+}
+
+async function clearAction(
+  context: AccessContext,
+  taskId: string,
+  bodyRecord: Record<string, unknown>,
+): Promise<NextResponse> {
+  const expectedStorageVersion = parseStorageVersionInput(bodyRecord.expectedStorageVersion);
+  if (expectedStorageVersion === null) {
+    return jsonResponse({
+      ok: false,
+      error: { code: "storage_version_required", message: "内容刚在其他位置更新，请刷新后重试。" },
+    }, 400);
+  }
+  try {
+    const cleared = await clearReviews({ context, taskId, expectedStorageVersion });
+    const snapshotAfter = await readReviewEvidenceSnapshot(context, taskId);
+    return jsonResponse({
+      ok: true,
+      data: { cleared: cleared.cleared, storageVersion: toStorageVersion(snapshotAfter) },
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/** 半自动采集 Preview（不写入）：隔离浏览器逐 ASIN 提取详情页公开 Top Reviews 片段 */
+async function collectAction(
+  context: AccessContext,
+  taskId: string,
+  bodyRecord: Record<string, unknown>,
+): Promise<NextResponse> {
+  // Acquisition Capability Gate（§30/§43）：VOC 自动采集复用 Amazon 浏览器采集能力
+  const capability = resolveBrowserAcquisitionCapability();
+  // Demo 模式（公网 Visitor 采集体验回放）：能力属本地环境时，用预置真实采集样本
+  // 回放评论采集流程（collect → collect-confirm 全链可用），结果标注“演示数据”。
+  if (capability.state === "local_env_required" && context.mode === "demo") {
+    try {
+      const items = buildDemoReviewCollectPreviewItems()
+        .map((item) => ({ ...item, duplicate: false }));
+      const pageResults = buildDemoReviewCollectPageResults();
+      const capturedAt = new Date().toISOString();
+      storeReviewCollectPreview({
+        previewId: DEMO_ACQUISITION_EVIDENCE_ID,
+        items,
+        pageResults,
+        capturedAt,
+        expiresAt: Date.now() + 15 * 60 * 1000,
+        subjectKey: reviewCollectSubjectKey(context),
+        taskId,
+      });
+      const snapshot = await readReviewEvidenceSnapshot(context, taskId);
+      return jsonResponse({
+        ok: true,
+        data: {
+          preview: { previewId: DEMO_ACQUISITION_EVIDENCE_ID, items, pageResults, capturedAt },
+          storageVersion: toStorageVersion(snapshot),
+          demo: true,
+        },
+      });
+    } catch (error) {
+      return errorResponse(error);
+    }
+  }
+  const gate = acquisitionGateError(capability, browserUnavailableMessage(capability.reasonCategory));
+  if (gate) {
+    const message = capability.state === "local_env_required"
+      ? REVIEW_LOCAL_ENV_REQUIRED_MESSAGE
+      : browserUnavailableMessage(capability.reasonCategory);
+    return jsonResponse({ ok: false, error: { code: gate.code, message } }, gate.status);
+  }
+  let asins;
+  try {
+    asins = assertReviewCollectRequest(bodyRecord.asins);
+  } catch (error) {
+    if (error instanceof ReviewCollectorError) {
+      return jsonResponse({ ok: false, error: { code: error.code, message: error.message } }, error.status);
+    }
+    throw error;
+  }
+  try {
+    // 统一编排与局部重试共享同一 Preview 生命周期：已有同任务/同主体/同 ASIN 的
+    // 「可操作」Preview（有待确认条目 / 页面被阻断 / 明确无评论）时只复用，不再次
+    // 启动浏览器采集。extraction_empty 等瞬时失败不算可操作：复用会把重试挡死在
+    // 同一个空 Preview 上（TTL 15 分钟），必须落到下方重新采集。
+    const existingPending = asins.length === 1
+      ? findPendingReviewCollectPreview({
+          subjectKey: reviewCollectSubjectKey(context),
+          taskId,
+          asin: asins[0].asin,
+        })
+      : null;
+    if (existingPending && isReusableReviewCollectPreview(existingPending)) {
+      const existing = await getReviewEvidence(context, taskId);
+      const existingKeys = new Set((existing?.dataset.reviews ?? []).map((review) => review.duplicateKey));
+      const items = existingPending.items.map((item) => {
+        const duplicateKey = buildReviewDuplicateKey({
+          reviewId: null,
+          asin: item.asin,
+         contentHash: buildReviewContentHash(item.reviewText ?? item.title),
+          rating: item.rating,
+          reviewDate: item.date,
+        });
+        return { ...item, duplicate: existingKeys.has(duplicateKey) };
+      });
+      return jsonResponse({
+        ok: true,
+        data: {
+          preview: {
+            previewId: existingPending.previewId,
+            items,
+            pageResults: existingPending.pageResults,
+            capturedAt: existingPending.capturedAt,
+          },
+          storageVersion: await readReviewEvidenceSnapshot(context, taskId).then((snapshot) => toStorageVersion(snapshot)),
+          reused: true,
+        },
+      });
+    }
+    const preview = await createReviewCollectPreview({ context, taskId, asins });
+    // 重复标记：与现有 dataset 的 duplicateKey 比对（reviewId 缺失时 asin+hash+rating+date）
+    const existing = await getReviewEvidence(context, taskId);
+    const existingKeys = new Set((existing?.dataset.reviews ?? []).map((review) => review.duplicateKey));
+    const items = preview.items.map((item) => {
+      const duplicateKey = buildReviewDuplicateKey({
+        reviewId: null,
+        asin: item.asin,
+        contentHash: buildReviewContentHash(item.reviewText ?? item.title),
+        rating: item.rating,
+        reviewDate: item.date,
+      });
+      return { ...item, duplicate: existingKeys.has(duplicateKey) };
+    });
+    return jsonResponse({
+      ok: true,
+      data: {
+        preview: {
+          previewId: preview.previewId,
+          items,
+          pageResults: preview.pageResults,
+          capturedAt: preview.capturedAt,
+        },
+        storageVersion: await readReviewEvidenceSnapshot(context, taskId).then((snapshot) => toStorageVersion(snapshot)),
+      },
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/**
+ * Playwright 正式评论采集入口。旧 action=collect 保持历史回放兼容；新入口
+ * 明确不调用原生 CDP，也不在浏览器侧直接写任务数据。
+ */
+async function collectPlaywrightAction(
+  context: AccessContext,
+  taskId: string,
+  bodyRecord: Record<string, unknown>,
+): Promise<NextResponse> {
+  if (context.mode !== "owner") {
+    return jsonResponse({ ok: false, error: { code: "owner_only", message: "Playwright 实时采集仅限本机 Owner 环境。" } }, 403);
+  }
+  let asins: ReturnType<typeof assertReviewCollectRequest>;
+  try {
+    asins = assertReviewCollectRequest(bodyRecord.asins);
+  } catch (error) {
+    if (error instanceof ReviewCollectorError) {
+      return jsonResponse({ ok: false, error: { code: error.code, message: error.message } }, error.status);
+    }
+    throw error;
+  }
+  const result = await collectAmazonReviewsWithPlaywright({ context, asins, traceId: newTraceId() });
+  if (result.status === "unavailable" || result.status === "failed") {
+    return jsonResponse({ ok: false, error: { code: result.errorCode ?? "review_collect_failed", message: result.errorMessage ?? "Playwright 评论采集未完成。", sessionDiagnostics: result.sessionDiagnostics ?? null } }, 409);
+  }
+  const capturedAt = new Date().toISOString();
+  const existing = await getReviewEvidence(context, taskId);
+  const existingKeys = new Set((existing?.dataset.reviews ?? []).map((review) => buildReviewDuplicateKey({
+    reviewId: review.reviewId,
+    asin: review.productAsin,
+    contentHash: review.contentHash,
+    rating: review.rating,
+    reviewDate: review.reviewDate,
+  })));
+  const items = result.items.map((item) => {
+    const duplicateKey = buildReviewDuplicateKey({
+      reviewId: null,
+      asin: item.asin,
+      contentHash: buildReviewContentHash(item.title),
+      rating: item.rating,
+      reviewDate: item.date,
+    });
+    return { ...item, duplicate: existingKeys.has(duplicateKey) };
+  });
+  const previewId = randomUUID();
+  storeReviewCollectPreview({
+    previewId,
+    items,
+    pageResults: result.pageResults.map((page) => ({
+      asin: page.asin,
+      status: page.status as never,
+      note: page.note,
+      extractedCount: page.extractedCount,
+      finalUrl: page.finalUrl,
+    })),
+    capturedAt,
+    expiresAt: Date.now() + 15 * 60 * 1000,
+    subjectKey: reviewCollectSubjectKey(context),
+    taskId,
+  });
+  const snapshot = await readReviewEvidenceSnapshot(context, taskId);
+  return jsonResponse({
+    ok: true,
+    data: {
+      preview: { previewId, items, pageResults: result.pageResults, capturedAt },
+      storageVersion: toStorageVersion(snapshot),
+      ...(result.status === "human_required" ? { warning: result.errorMessage } : {}),
+    },
+  });
+}
+
+/** 人工确认后写入：字段值全部由服务端从 Preview 缓存重建（客户端只传 previewId + 选中索引） */
+async function collectConfirmAction(
+  context: AccessContext,
+  taskId: string,
+  bodyRecord: Record<string, unknown>,
+): Promise<NextResponse> {
+  const expectedStorageVersion = parseStorageVersionInput(bodyRecord.expectedStorageVersion);
+  if (expectedStorageVersion === null) {
+    return jsonResponse({
+      ok: false,
+      error: { code: "storage_version_required", message: "内容刚在其他位置更新，请刷新后重试。" },
+    }, 400);
+  }
+  const previewId = asString(bodyRecord.previewId);
+  if (!previewId) {
+    return jsonResponse({ ok: false, error: { code: "preview_required", message: "缺少采集预览标识。" } }, 400);
+  }
+  const selectedRaw = bodyRecord.selectedIndices;
+  if (!Array.isArray(selectedRaw) || selectedRaw.length === 0 || selectedRaw.length > 20) {
+    return jsonResponse({ ok: false, error: { code: "invalid_selection", message: "请选择要确认的评论（1-20 条）。" } }, 400);
+  }
+  const selectedIndices = selectedRaw
+    .map((value) => (typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : -1))
+    .filter((value) => value >= 0);
+  if (selectedIndices.length === 0) {
+    return jsonResponse({ ok: false, error: { code: "invalid_selection", message: "请选择要确认的评论。" } }, 400);
+  }
+  // Preview 只读取（跨主体/跨任务 fail-closed）；正式导入成功后才消费，失败可重试。
+  const preview = peekReviewCollectPreview(previewId, {
+    subjectKey: reviewCollectSubjectKey(context),
+    taskId,
+  });
+  if (!preview) {
+    return jsonResponse({
+      ok: false,
+      error: { code: "preview_expired", message: "采集预览已失效（可能已确认或超时），请重新采集。" },
+    }, 400);
+  }
+  try {
+    const uniqueIndices = [...new Set(selectedIndices)];
+    const selected: Array<{ index: number; item: (typeof preview.items)[number] }> = [];
+    for (const index of uniqueIndices) {
+      if (index >= 0 && index < preview.items.length) selected.push({ index, item: preview.items[index] });
+    }
+    if (selected.length === 0) {
+      return jsonResponse({ ok: false, error: { code: "invalid_selection", message: "所选评论不在预览范围内。" } }, 400);
+    }
+    const reviews: ReviewImportInput[] = selected.map(({ item }) => ({
+      asin: item.asin,
+      sourceProductRole: item.role,
+       reviewText: item.reviewText ?? item.title,
+       verifiedPurchase: item.verifiedPurchase ?? null,
+      rating: item.rating,
+      reviewDate: item.date ?? undefined,
+      sourceUrl: item.sourceUrl,
+      sourceRef: item.sourceUrl,
+      bindingNote: item.bindingNote,
+      sourceType: "browser",
+      bindingKind: "browser_verified",
+      collectorVersion: REVIEW_COLLECTOR_VERSION,
+    }));
+    const sourceEvidenceRefs = await captureReviewSourceRefs(context, taskId, reviews, "amazon_dom");
+    await importReviews({ context, taskId, expectedStorageVersion, reviews, sourceEvidenceRefs });
+    const consumed = consumeReviewCollectPreview(previewId, {
+      subjectKey: reviewCollectSubjectKey(context),
+      taskId,
+    });
+    if (!consumed) {
+      return jsonResponse({
+        ok: false,
+        error: { code: "preview_expired", message: "采集预览已失效，请重新采集。" },
+      }, 409);
+    }
+    const snapshotAfter = await readReviewEvidenceSnapshot(context, taskId);
+    return jsonResponse({
+      ok: true,
+      data: { confirmed: true, storageVersion: toStorageVersion(snapshotAfter) },
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}

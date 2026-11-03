@@ -1,0 +1,29 @@
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it } from "vitest";
+import type { MarketIntelligence, MarketIntelligenceSample } from "@/lib/marketScan/intelligence";
+import { compareField, comparisonCell, questionFields } from "./marketComparisonPresentation";
+import { MarketProductComparison } from "./MarketProductComparison";
+
+function fixture(): MarketIntelligence {
+  const samples = [0, 1, 2].map((index) => ({ asin: `B01234567${index}`, subjectKey: `amazon:US:B01234567${index}`, title: "Untranslated source title Set of 2", brand: "Fixture", price: 10 + index * 0.1, priceCurrency: "USD", rating: 4.6, reviewCount: 570, valid: true, monthlySalesEstimate: null, bsr: null,
+    evidence: { id: `ev${index}`, evidenceId: `ev${index}`, subjectKey: `amazon:US:B01234567${index}`, contentHash: "h", capturedAt: "2026-10-24T00:00:00Z", version: 1, sourceUrl: null, nature: "source_observed" },
+    reviewCountCaliber: { state: "verified", lockedValue: 570, lockedSurface: "detail", productPageValue: 570, productPageCapturedAt: "2026-10-24T00:00:00Z", productPageEvidenceId: "detail", conflicts: [], reason: "product_page_surface" },
+  } satisfies MarketIntelligenceSample));
+  return { schema: "market-intelligence.v1", scanId: "fixture", scanName: "fixture", marketplace: "US", resourceVersion: "v1", sampleHash: "sample", inputHash: "input", observedAt: "2026-10-24T00:00:00Z", samples, sources: [], keywords: [], productMarkets: [], productSignals: [], trends: [], reviews: [], variations: [], category: null, queryBindings: [], bindingCandidates: [], evidenceChanges: [], limitations: [], reports: [], provider: { ready: false, code: "FIXTURE", message: "fixture" },
+    productDetails: samples.map((sample) => ({ subjectKey: sample.subjectKey, evidence: sample.evidence, facts: { material: "Silicone", itemDimensions: { length: 10, width: 20, unit: "cm" }, itemWeight: { value: 100, unit: "g" }, bulletPoints: [], conflicts: [], fieldEvidence: {} } })) as unknown as MarketIntelligence["productDetails"],
+  };
+}
+describe("question-focused comparison presentation", () => {
+  it("does not label tiny price differences as advantages", () => { const d = fixture(); expect(compareField(d, d.samples, "price")).toBe("close"); });
+  it("describes substantial price differences without deriving unit price", () => { const d = fixture(); d.samples[1].price = 20; expect(compareField(d, d.samples, "price")).toBe("different"); expect(comparisonCell(d, d.samples[1], "price").display).toBe("20 USD"); });
+  it("keeps missing currency and cross-currency comparisons unknown", () => { const d = fixture(); d.samples[1].priceCurrency = "EUR"; expect(compareField(d, d.samples, "price")).toBe("unknown"); d.samples[1].priceCurrency = null; expect(compareField(d, d.samples, "price")).toBe("unknown"); });
+  it("keeps missing fields and single-product comparison unknown", () => { const d = fixture(); d.samples[0].price = null; expect(compareField(d, d.samples, "price")).toBe("unknown"); expect(compareField(d, [d.samples[1]], "material")).toBe("unknown"); });
+  it("normalizes recognized dimension units solely for display comparison", () => { const d = fixture(); d.productDetails![1].facts.itemDimensions = { length: 10 / 2.54, width: 20 / 2.54, unit: "in" }; expect(compareField(d, d.samples, "dimensions")).toBe("close"); d.productDetails![1].facts.itemDimensions = { length: 10, width: 20, unit: "unknown" } as unknown as NonNullable<MarketIntelligence["productDetails"]>[number]["facts"]["itemDimensions"]; expect(compareField(d, d.samples, "dimensions")).toBe("unknown"); });
+  it("does not compare incompatible dimension shapes or package weight", () => { const d = fixture(); d.productDetails![1].facts.itemDimensions = { length: 10, width: 20, height: 1, unit: "cm" }; expect(compareField(d, d.samples, "dimensions")).toBe("unknown"); expect(compareField(d, d.samples, "weight")).toBe("unknown"); });
+  it("prioritizes conflict over missing and never selects a conflicting candidate", () => { const d = fixture(); d.productDetails![1].facts.conflicts = [{ field: "extended.material", candidates: [] }] as unknown as NonNullable<MarketIntelligence["productDetails"]>[number]["facts"]["conflicts"]; expect(compareField(d, d.samples, "material")).toBe("conflict"); expect(comparisonCell(d, d.samples[1], "material").display).toBe("来源冲突，待核实"); });
+  it("requires verified review readings and retains incompatible values", () => { const d = fixture(); d.samples[0].reviewCountCaliber!.state = "unverified"; expect(compareField(d, d.samples, "reviews")).toBe("unknown"); d.samples[0].reviewCountCaliber!.state = "conflict"; d.samples[0].reviewCountCaliber!.productPageValue = 27477; expect(compareField(d, d.samples, "reviews")).toBe("conflict"); expect(comparisonCell(d, d.samples[0], "reviews").display).toContain("27,477"); });
+  it("does not turn a 0.1 rating difference into a quality advantage", () => { const d = fixture(); d.samples[1].rating = 4.7; expect(compareField(d, d.samples, "rating")).toBe("close"); });
+  it("focuses no more than three dimensions on the question", () => { expect(questionFields("尺寸适配")).toEqual(["dimensions", "material", "price"]); expect(questionFields("整包重量影响")).toEqual(["weight", "dimensions", "price"]); expect(questionFields("评价差异")).toEqual(["reviews", "rating", "material"]); });
+  it("works without a report and keeps full parameters and original titles in disclosures", () => { const d = fixture(); const before = JSON.stringify(d); const html = renderToStaticMarkup(React.createElement(MarketProductComparison, { comparison: d.samples, data: d })); expect(html).toContain("基础事实对比（无需 AI 报告）"); expect(html).toContain("默认最多 3 项"); expect(html).toContain("展开其余参数"); expect(html).toContain("英文原标题"); expect(html).toContain("当前接口未提供"); expect(html).not.toContain("单件价 5"); expect(JSON.stringify(d)).toBe(before); });
+});

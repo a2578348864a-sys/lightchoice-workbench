@@ -1,0 +1,18 @@
+import {beforeEach,describe,it,expect,vi} from "vitest";
+import {NextRequest} from "next/server";
+const mocks=vi.hoisted(()=>({research:vi.fn(),collect:vi.fn(),ensure:vi.fn(),getById:vi.fn(),claim:vi.fn(),saveProgress:vi.fn()}));
+vi.mock("@/lib/server/marketIntelligenceService",()=>({getMarketIntelligence:mocks.research}));
+vi.mock("@/lib/server/sellerSpriteVisibleBrowser",()=>({collectSellerSpriteSubjectWithCdp:mocks.collect}));
+vi.mock("@/lib/server/sellerSpriteCaptureJobRepository",()=>({createSellerSpriteCaptureJobRepository:()=>mocks}));
+vi.mock("@/lib/server/v5ApiRoute",async(original)=>({...await original<typeof import("@/lib/server/v5ApiRoute")>(),writeAuth:()=>({ok:true,context:{mode:"owner",token:""}}),writeOriginOk:()=>true}));
+import {POST} from "./route";
+import {sellerSpriteCaptureAccessScopeHash} from "@/lib/server/sellerSpriteCaptureJob";
+const key="amazon:US:B012345678";
+const request=(body:unknown)=>new NextRequest("http://localhost/api/source-layer/acquire/sellersprite-subject",{method:"POST",headers:{Origin:"http://localhost","Content-Type":"application/json"},body:JSON.stringify(body)});
+beforeEach(()=>{vi.clearAllMocks();mocks.research.mockResolvedValue({marketplace:"US",statistics:{subjects:[key]}});mocks.ensure.mockResolvedValue({job:{jobId:"job",status:"PENDING"},created:true});});
+describe("research-scoped SellerSprite single page tasks",()=>{
+ it("accepts a real-length competitor URL without weakening identity or credential validation",async()=>{const sourceUrl=`https://www.sellersprite.com/v3/competitor-lookup?market=US&asins=B012345678&nodeIdPaths=${"1,".repeat(100)}`;expect((await POST(request({action:"prepare",scanId:"scan",module:"sellersprite_product_market",asin:"B012345678",sourceUrl}))).status).toBe(200);expect(mocks.ensure).toHaveBeenCalledWith(expect.objectContaining({query:expect.objectContaining({sourceUrl})}));expect((await POST(request({action:"prepare",scanId:"scan",module:"sellersprite_product_market",asin:"B012345678",sourceUrl:sourceUrl+"&token=secret"}))).status).toBe(422);expect(mocks.collect).not.toHaveBeenCalled();});
+ it("rejects outside-scope ASINs and credential-bearing URLs before any task or source request",async()=>{for(const patch of [{asin:"B087654321"},{sourceUrl:"https://secret@www.sellersprite.com/asin/B012345678"},{sourceUrl:"https://www.sellersprite.com/asin/B012345678?token=secret"}]){const response=await POST(request({action:"prepare",scanId:"scan",module:"historical_trend",asin:"B012345678",sourceUrl:"https://www.sellersprite.com/asin/B012345678",...patch}));expect(response.status).toBe(422);}expect(mocks.ensure).not.toHaveBeenCalled();expect(mocks.collect).not.toHaveBeenCalled();});
+ it("preparing saves research identity and a one-page bound without collecting",async()=>{expect((await POST(request({action:"prepare",scanId:"scan",module:"historical_trend",asin:"B012345678",sourceUrl:"https://www.sellersprite.com/asin/B012345678"}))).status).toBe(200);expect(mocks.ensure).toHaveBeenCalledWith(expect.objectContaining({windowBudget:1,query:expect.objectContaining({researchScanId:"scan",subjectKey:key})}));expect(mocks.collect).not.toHaveBeenCalled();});
+ it("prevents using a task belonging to another research even for status",async()=>{mocks.getById.mockResolvedValue({accessScopeHash:sellerSpriteCaptureAccessScopeHash("owner"),query:{researchScanId:"other",kind:"single_subject_current_page",subjectKey:key},module:"historical_trend"});const response=await POST(request({action:"status",scanId:"scan",jobId:"foreign"}));expect(response.status).toBe(404);expect(mocks.claim).not.toHaveBeenCalled();});
+});

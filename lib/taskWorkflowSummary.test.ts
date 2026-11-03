@@ -1,0 +1,392 @@
+import { describe, expect, it } from "vitest";
+import { deriveTaskWorkflowSummary, getTaskBatchMeta, getTaskSourceMeta } from "@/lib/taskWorkflowSummary";
+
+describe("deriveTaskWorkflowSummary", () => {
+  it("extracts workflow final report into operation summary", () => {
+    const summary = deriveTaskWorkflowSummary({
+      type: "workflow",
+      title: "手机支架 一键分析",
+      materialText: "手机支架",
+      oneLineSummary: "适合继续",
+      level: "A",
+      decisionStatus: "pending",
+      result: {
+        productName: "桌面手机支架",
+        finalReport: {
+          finalVerdict: "可以继续小单测试",
+          riskLevel: "green",
+          beginnerFit: "适合新手",
+          canTestSmallBatch: true,
+          nextSteps: ["联系供应商", "核算成本"],
+        },
+      },
+    });
+
+    expect(summary.productName).toBe("桌面手机支架");
+    expect(summary.verdictLabel).toBe("可以继续小单测试");
+    expect(summary.riskLabel).toBe("低风险");
+    expect(summary.riskTone).toBe("emerald");
+    expect(summary.priorityLabel).toBe("可跟进");
+    expect(summary.primaryNextAction).toBe("联系供应商");
+    expect(summary.missingFields).toEqual([]);
+  });
+
+  it("marks high risk workflow as cautious", () => {
+    const summary = deriveTaskWorkflowSummary({
+      type: "workflow",
+      title: "高风险商品",
+      materialText: "高风险商品",
+      oneLineSummary: "",
+      level: "C",
+      decisionStatus: "pending",
+      result: {
+        productName: "高风险商品",
+        finalReport: {
+          finalVerdict: "不建议继续",
+          riskLevel: "red",
+          beginnerFit: "不适合新手",
+          canTestSmallBatch: false,
+          nextSteps: ["先查平台规则"],
+        },
+      },
+    });
+
+    expect(summary.riskLabel).toBe("高风险");
+    expect(summary.priorityLabel).toBe("暂缓/谨慎");
+    expect(summary.priorityTone).toBe("rose");
+  });
+
+  it("degrades safely when workflow fields are missing", () => {
+    const summary = deriveTaskWorkflowSummary({
+      type: "workflow",
+      title: "缺字段商品",
+      materialText: "缺字段商品",
+      oneLineSummary: "",
+      level: "",
+      decisionStatus: "pending",
+      result: { productName: "缺字段商品" },
+    });
+
+    expect(summary.verdictLabel).toBe("暂无");
+    expect(summary.riskLabel).toBe("暂无");
+    expect(summary.beginnerLabel).toBe("暂无");
+    expect(summary.nextActions[0]).toContain("联系供应商");
+    expect(summary.missingFields).toContain("finalReport");
+  });
+
+  it("normalizes the system task suffix for legacy history cards without a result product name", () => {
+    const summary = deriveTaskWorkflowSummary({
+      type: "workflow",
+      title: "桌面收纳盒 一键分析",
+      materialText: "桌面收纳盒",
+      oneLineSummary: "",
+      level: "",
+      decisionStatus: "pending",
+      result: {},
+    });
+
+    expect(summary.productName).toBe("桌面收纳盒");
+  });
+
+  it("prefers agentOutputSnapshot for stable task summary fields", () => {
+    const summary = deriveTaskWorkflowSummary({
+      type: "workflow",
+      title: "旧标题",
+      materialText: "旧标题",
+      oneLineSummary: "旧摘要",
+      level: "A",
+      decisionStatus: "pending",
+      result: {
+        productName: "桌面手机支架",
+        agentOutputSnapshot: {
+          version: "agent-output-v1",
+          generatedAt: "2026-07-01T00:00:00.000Z",
+          fallbackUsed: false,
+          warnings: [],
+          sourcingSnapshot: {
+            supplierConclusion: "可找供应商",
+            sourceSignals: [],
+            priceSignals: [],
+            availabilitySignals: [],
+            assumptions: [],
+            missingInfo: [],
+            confidence: "medium",
+          },
+          riskSnapshot: {
+            riskLevel: "high",
+            riskFlags: ["ip_check"],
+            complianceConcerns: [],
+            ipConcerns: [],
+            logisticsConcerns: [],
+            safetyConcerns: [],
+            riskReason: "外观专利风险",
+            needsManualReview: true,
+          },
+          summarySnapshot: {
+            decision: "not_recommended",
+            decisionReason: "外观风险高",
+            targetUser: "",
+            sellingPoints: [],
+            concerns: ["外观专利"],
+            confidence: "medium",
+          },
+          listingSnapshot: {
+            titleDraft: "Phone Stand",
+            bulletDrafts: [],
+            keywordHints: [],
+            imageIdeas: [],
+            complianceNotes: [],
+            missingInputs: [],
+          },
+          nextActionSnapshot: {
+            primaryAction: "check_compliance",
+            actionLabel: "先查合规风险",
+            checklist: ["查专利"],
+            blockingIssues: ["ip_check"],
+            suggestedOwnerStep: "查专利",
+          },
+          humanReviewSnapshot: {
+            required: true,
+            reasons: ["风险或合规信息需要人工确认"],
+            reviewFocus: ["外观专利"],
+            defaultStatus: "needs_review",
+          },
+        },
+        finalReport: {
+          finalVerdict: "可以继续小单测试",
+          riskLevel: "green",
+          beginnerFit: "适合新手",
+          canTestSmallBatch: true,
+          nextSteps: ["联系供应商"],
+        },
+      },
+    });
+
+    expect(summary.verdictLabel).toBe("外观风险高");
+    expect(summary.riskLabel).toBe("高风险");
+    expect(summary.priorityLabel).toBe("暂缓/谨慎");
+    expect(summary.primaryNextAction).toBe("查专利");
+    expect(summary.missingFields).toEqual([]);
+  });
+
+  it("uses decision status as a strong priority signal（正式决定载体存在）", () => {
+    const summary = deriveTaskWorkflowSummary({
+      type: "workflow",
+      title: "已淘汰商品",
+      materialText: "已淘汰商品",
+      oneLineSummary: "可以继续小单测试",
+      level: "A",
+      decisionStatus: "rejected",
+      result: {
+        finalReport: {
+          finalVerdict: "可以继续小单测试",
+          riskLevel: "green",
+          beginnerFit: "适合新手",
+          canTestSmallBatch: true,
+          nextSteps: ["联系供应商"],
+        },
+        productResearchSummary: { schema: "product-research-record.v1", revision: 1, status: "abandoned" },
+      },
+    });
+
+    expect(summary.priorityLabel).toBe("已放弃");
+    expect(summary.priorityTone).toBe("rose");
+  });
+
+  it("V3 Human Decision Authority: decisionStatus=continue 无正式决定 → 不显示人工已认可类结论", () => {
+    const summary = deriveTaskWorkflowSummary({
+      type: "workflow",
+      title: "Bentgo 商品研究",
+      materialText: "Bentgo",
+      oneLineSummary: "",
+      level: "",
+      decisionStatus: "continue",
+      result: {
+        productName: "Bentgo Chill Kids",
+        finalReport: {
+          finalVerdict: "可以继续小单测试",
+          riskLevel: "green",
+          beginnerFit: "适合新手",
+          canTestSmallBatch: true,
+          nextSteps: ["联系供应商"],
+        },
+        // 无 productResearchSummary / humanDecision：兼容列 continue 不构成人工决定
+      },
+    });
+
+    // 无正式决定：reason 不得声称"人工已认可"（可因 AI 结论显示"可跟进"，但必须说明是 AI 结论/仍需人工确认）
+    expect(summary.reason).not.toContain("人工已");
+    expect(summary.reason).toContain("AI 结论");
+    expect(summary.reason).toContain("人工确认");
+  });
+
+  it("V3 Human Decision Authority: 正式决定 + continue → 保留人工已认可结论", () => {
+    const summary = deriveTaskWorkflowSummary({
+      type: "workflow",
+      title: "正式决定商品",
+      materialText: "正式决定商品",
+      oneLineSummary: "",
+      level: "A",
+      decisionStatus: "continue",
+      result: {
+        finalReport: {
+          finalVerdict: "可以继续小单测试",
+          riskLevel: "green",
+          beginnerFit: "适合新手",
+          canTestSmallBatch: true,
+          nextSteps: ["联系供应商"],
+        },
+        productResearchSummary: { schema: "product-research-record.v1", revision: 1, status: "creative_ready" },
+      },
+    });
+
+    expect(summary.priorityLabel).toBe("可跟进");
+    expect(summary.reason).toContain("人工");
+  });
+});
+
+describe("getTaskBatchMeta", () => {
+  it("handles agent output snapshot with missing checklist (legacy record)", () => {
+    const summary = deriveTaskWorkflowSummary({
+      type: "workflow",
+      title: "旧记录无 checklist",
+      materialText: "旧记录",
+      oneLineSummary: "",
+      level: "B",
+      decisionStatus: "pending",
+      result: {
+        productName: "旧记录商品",
+        agentOutputSnapshot: {
+          version: "agent-output-v1",
+          riskSnapshot: { needsManualReview: true, riskLevel: "medium", riskFlags: ["risk1"] },
+          summarySnapshot: { decision: "review", decisionReason: "需要人工确认", sellingPoints: [], concerns: [], confidence: "medium" },
+          nextActionSnapshot: {
+            primaryAction: "manual_review",
+            actionLabel: "人工复核",
+            suggestedOwnerStep: "复核供应商报价",
+            // 早期记录无 checklist 字段 → 应回退不崩溃
+          },
+          listingSnapshot: { titleDraft: "标题", bulletDrafts: [], keywordHints: [], missingInputs: [] },
+          humanReviewSnapshot: { required: true, reasons: [], reviewFocus: [], defaultStatus: "needs_review" },
+          sourcingSnapshot: { missingInfo: [] },
+          warnings: [],
+        },
+      },
+    });
+    expect(summary.productName).toBe("旧记录商品");
+    expect(summary.primaryNextAction).toBe("复核供应商报价");
+    expect(summary.verdictLabel).toBe("需要人工确认");
+  });
+
+  it("extracts valid batch metadata", () => {
+    expect(getTaskBatchMeta({
+      batchMeta: {
+        batchId: "batch-1",
+        batchName: "批量分析",
+        batchIndex: 2,
+        batchTotal: 3,
+        source: "workflow_batch_mvp",
+      },
+    })).toEqual({
+      batchId: "batch-1",
+      batchName: "批量分析",
+      batchIndex: 2,
+      batchTotal: 3,
+      source: "workflow_batch_mvp",
+    });
+  });
+});
+
+describe("getTaskSourceMeta", () => {
+  it("extracts opportunity source metadata from workflow result", () => {
+    expect(getTaskSourceMeta({
+      productName: "桌面手机支架",
+      sourceMeta: {
+        source: "opportunity",
+        opportunityTitle: "桌面手机支架",
+        opportunitySource: "机会雷达候选品",
+        opportunityScore: 86.4,
+        keyword: "phone stand",
+        importedAt: "2026-06-24T10:00:00.000Z",
+      },
+    })).toEqual({
+      source: "opportunity",
+      opportunityTitle: "桌面手机支架",
+      opportunitySource: "机会雷达候选品",
+      opportunityScore: 86,
+      keyword: "phone stand",
+      importedAt: "2026-06-24T10:00:00.000Z",
+    });
+  });
+
+  it("extracts candidate-to-agent source metadata fields", () => {
+    expect(getTaskSourceMeta({
+      productName: "桌面手机支架",
+      sourceMeta: {
+        source: "opportunity",
+        from: "opportunity",
+        entry: "candidate_to_agent_m1",
+        opportunityTitle: "桌面手机支架",
+        opportunitySource: "机会雷达候选品",
+        candidateId: "test-candidate",
+        sourceTitle: "test-title",
+        originalName: "原始候选：phone stand",
+        analyzedName: "桌面手机支架",
+      },
+    })).toMatchObject({
+      source: "opportunity",
+      from: "opportunity",
+      entry: "candidate_to_agent_m1",
+      opportunityTitle: "桌面手机支架",
+      opportunitySource: "机会雷达候选品",
+      candidateId: "test-candidate",
+      sourceTitle: "test-title",
+      originalName: "原始候选：phone stand",
+      analyzedName: "桌面手机支架",
+    });
+  });
+
+  it("extracts candidate evidence snapshot and candidate_to_agent_run entry", () => {
+    expect(getTaskSourceMeta({
+      productName: "Desk Phone Stand",
+      sourceMeta: {
+        source: "opportunity",
+        from: "opportunity",
+        entry: "candidate_to_agent_run",
+        opportunityTitle: "Desk Phone Stand",
+        candidateId: "test-candidate",
+        evidenceSnapshot: {
+          version: 1,
+          sourceType: "web",
+          sourceName: "source importer",
+          sourceUrl: "https://example.com/item",
+          evidenceItems: ["product_page"],
+          extractionSignals: ["url_path_product"],
+          qualityScore: 86,
+          confidence: "high",
+          riskFlags: [],
+          decision: "recommended",
+          decisionReason: "Specific product page with usable source evidence.",
+          nextAction: "Continue to agent run after manual confirmation.",
+          generatedAt: "2026-06-30T10:00:00.000Z",
+        },
+      },
+    })).toMatchObject({
+      source: "opportunity",
+      from: "opportunity",
+      entry: "candidate_to_agent_run",
+      opportunityTitle: "Desk Phone Stand",
+      candidateId: "test-candidate",
+      evidenceSnapshot: {
+        qualityScore: 86,
+        decision: "recommended",
+        confidence: "high",
+      },
+    });
+  });
+
+  it("ignores unsupported or incomplete source metadata", () => {
+    expect(getTaskSourceMeta({ sourceMeta: { source: "manual" } })).toBeNull();
+    expect(getTaskSourceMeta({ sourceMeta: { source: "opportunity" } })).toBeNull();
+  });
+});

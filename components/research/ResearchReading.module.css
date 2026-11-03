@@ -1,0 +1,111 @@
+/* Scoped to 03. Existing DTOs, evidence and cost/decision guards are unchanged. */
+.workspace { min-width: 0; }
+.workspace:is([data-research-workspace="evidence"], [data-research-workspace="comparison"]) > div:first-child > div:last-child {
+  max-width: 100%; min-width: 0; overflow-wrap: anywhere;
+}
+.workspace:global(.lc-research-detail)[data-research-workspace="evidence"] :global(.lc-research-stage[data-mode="evidence"]),
+.workspace:global(.lc-research-detail)[data-research-workspace="comparison"] :global(.lc-research-stage[data-mode="comparison"]) {
+  display: block;
+}
+.workspace[data-research-workspace="evidence"] :global(.lc-research-stage-main),
+.workspace[data-research-workspace="comparison"] :global(.lc-research-stage-main) { min-width: 0; width: 100%; }
+.workspace:global(.lc-research-detail)[data-research-workspace="evidence"] :global(.lc-research-body),
+.workspace:global(.lc-research-detail)[data-research-workspace="comparison"] :global(.lc-research-body) { grid-template-columns: minmax(0, 1fr); }
+.workspace[data-research-workspace="evidence"] :global(.lc-research-body) > div:first-child,
+.workspace[data-research-workspace="comparison"] :global(.lc-research-body) > div:first-child { grid-column: 1 / -1; min-width: 0; }
+
+.evidenceNav { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 0 16px; margin-bottom: 20px; border-bottom: 1px solid #dbe6de; }
+.evidenceNav button { flex: 1 1 180px; display: flex; flex-direction: column; gap: 4px; min-height: 64px; padding: 12px 16px; border: 1px solid transparent; border-radius: 12px; background: transparent; text-align: left; cursor: pointer; }
+.evidenceNav strong { color: #365744; font-size: 14px; font-weight: 650; }
+.evidenceNav small { color: #607466; font-size: 12px; }
+.evidenceNav button:hover { background: #eaf4ed; }
+.evidenceNav button[aria-current="true"] { background: #cdeedc; border-color: #92bea2; }
+
+.reader:global(.lc-reader) { grid-template-columns: minmax(240px, 27%) minmax(0, 1fr); gap: 24px; }
+.reader :global(.lc-reader-list) { top: 24px; max-height: calc(100vh - 48px); border-radius: 12px; box-shadow: none; }
+.reader :global(.lc-reader-list-head) { padding: 16px; color: #3c614b; font-size: 14px; }
+.reader :global(.lc-reader-list-head) em { color: #5a7061; font-size: 12px; }
+.reader :global(.lc-reader-list) button { padding: 12px; border-radius: 8px; }
+.reader :global(.lc-reader-list) button[aria-current="true"] { box-shadow: none; background: #e4f4e9; border-color: #a4c9b0; }
+.reader :global(.lc-reader-item-text) strong { font-size: 14px; line-height: 1.6; }
+.reader :global(.lc-reader-item-text) small { margin-top: 4px; font-size: 13px; color: #5b7262; line-height: 1.6; }
+.reader :global(.lc-reader-item-text) em,
+.reader :global(.lc-reader-index) { color: #607466; font-size: 12px; }
+.reader :global(.lc-reader-body) { min-width: 0; padding: 24px; border-radius: 12px; box-shadow: none; }
+.reader :global(.lc-reader-head) { gap: 16px; padding-bottom: 0; border: 0; }
+.reader :global(.lc-reader-head) h2 { font-size: 21px; line-height: 1.5; color: #284d37; }
+.reader :global(.lc-reader-count) { flex-shrink: 0; font-size: 12px; color: #607466; }
+.reviewContext { margin: 8px 0 24px; color: #58715f; font-size: 13px; line-height: 1.8; }
+.reviewContext a { color: #326b49; text-decoration: underline; text-underline-offset: 3px; }
+.reader :global(.lc-reader-quote) { max-width: 72ch; margin: 0 0 24px; padding: 0; background: transparent; border: 0; border-radius: 0; color: #2f4437; font-size: 16px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; }
+.reader :global(.lc-reader-quote-tag) { margin-bottom: 8px; color: #607466; font-size: 12px; letter-spacing: 0; }
+.interpretation { padding: 14px 16px; background: #eef5fb; border-radius: 10px; color: #3d5d76; }
+.interpretation summary,
+.provenance summary { cursor: pointer; font-size: 14px; font-weight: 650; line-height: 1.7; display: flex; align-items: center; justify-content: space-between; gap: 12px; list-style: none; }
+.interpretation summary::-webkit-details-marker,
+.provenance summary::-webkit-details-marker { display: none; }
+.interpretation summary::after,
+.provenance summary::after { content: "展开 ▾"; flex: 0 0 auto; color: #6b8578; font-size: 12.5px; font-weight: 500; }
+.interpretation[open] summary::after,
+.provenance[open] summary::after { content: "收起 ▴"; }
+.interpretation p { margin: 8px 0 0; font-size: 14px; line-height: 1.85; }
+.interpretation ul { padding: 0; margin: 16px 0 0; list-style: none; }
+.interpretation li { padding: 12px 0; border-top: 1px solid #d6e3ee; }
+.interpretation strong { font-size: 14px; }
+.provenance { margin-top: 20px; padding: 16px 0; border-top: 1px solid #e2e9e4; border-bottom: 1px solid #e2e9e4; color: #466650; }
+.reader :global(.lc-reader-meta) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; margin-top: 20px; }
+.reader :global(.lc-reader-meta) > div { display: block; padding: 0; background: transparent; border: 0; border-radius: 0; min-width: 0; }
+.reader :global(.lc-reader-meta) dt { color: #607466; font-size: 12px; }
+.reader :global(.lc-reader-meta) dd { margin-top: 4px; color: #385a45; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.reader :global(.lc-reader-refs) { margin-top: 20px; padding-top: 16px; }
+.reader :global(.lc-reader-refs-title) { font-size: 14px; color: #466650; }
+.reader :global(.lc-reader-refs) code { font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.reader :global(.lc-reader-refs) span { font-size: 12px; color: #607466; overflow-wrap: anywhere; }
+.reader :global(.lc-reader-note) { margin-top: 20px; padding: 0; background: transparent; border: 0; color: #655d3e; font-size: 13px; line-height: 1.8; }
+.reader :global(.lc-reader-foot) { justify-content: space-between; margin-top: 20px; padding-top: 16px; }
+.reader :global(.lc-reader-foot) button { font-size: 14px; padding: 8px 0; min-height: 36px; }
+
+.feasibility { position: static; margin-bottom: 24px; padding: 16px 20px; background: #fff7e7; border: 1px solid #e7d4ac; border-radius: 12px; color: #6e542c; }
+.feasibility[data-available="true"] { background: #e4f4e9; border-color: #a4c9b0; color: #365b44; }
+.feasibilityRow { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; }
+.feasibilityRow h2 { font-size: 13px; font-weight: 600; }
+.feasibilityValue { margin-top: 4px; font-size: 18px; font-weight: 700; }
+.feasibilityReason { flex: 1; min-width: 220px; font-size: 14px; line-height: 1.8; }
+.feasibilityRow button { padding: 8px 12px; border: 1px solid #d6be95; border-radius: 8px; background: #fff; color: #62502f; font-size: 14px; font-weight: 600; cursor: pointer; }
+.feasibilityDetails { margin-top: 12px; font-size: 13px; }
+.feasibilityDetails summary { cursor: pointer; }
+.feasibilityDetails ul { margin-top: 12px; padding-left: 20px; line-height: 1.85; }
+.feasibilityHistory { padding: 16px 0; border-top: 1px solid #dbe6de; }
+.feasibilityHistory > summary { cursor: pointer; color: #466650; font-size: 14px; font-weight: 600; }
+.feasibilityHistory > section { margin-top: 16px; }
+.researchContext { padding: 16px 0; border-top: 1px solid #dbe6de; }
+.researchContext > summary { color: #526078; font-size: 14px; font-weight: 600; cursor: pointer; }
+.researchContext > section { margin-top: 16px; }
+.workspace[data-research-workspace="comparison"][data-research-view="research-cost-section"] .feasibility { display: none; }
+
+/* Three subordinate views share one width, rather than stacking old report grids. */
+.workspace[data-research-workspace="comparison"][data-research-view="deep-research-competitors"] :global(#deep-research-opportunities),
+.workspace[data-research-workspace="comparison"][data-research-view="deep-research-opportunities"] :global(#deep-research-competitors),
+.workspace[data-research-workspace="comparison"]:not([data-research-view="research-cost-section"]) :global(.lc-research-body),
+.workspace[data-research-workspace="comparison"][data-research-view="research-cost-section"] :global(.lc-deep-projection) { display: none; }
+.workspace[data-research-workspace="comparison"] :global(.lc-deep-projection),
+.workspace[data-research-workspace="comparison"] :global(.lc-research-body) { margin-top: 0; }
+.workspace[data-research-workspace="comparison"] :global(#deep-research-opportunities),
+.workspace[data-research-workspace="comparison"] :global(#deep-research-competitors),
+.workspace[data-research-workspace="comparison"] :global(#research-cost-section) { scroll-margin-top: 88px; min-width: 0; }
+.workspace[data-research-workspace="comparison"] :global([data-testid="deep-research-comparison-differences"]) { background: #eaf5ed; border-color: #cce1d3; }
+.workspace[data-research-workspace="comparison"] :global(#research-cost-section),
+.workspace[data-research-workspace="comparison"] :global([data-testid="unit-economics-result"]) { box-shadow: none; background-image: none; }
+.workspace[data-research-workspace="comparison"] :global([data-testid="unit-economics-result"]) { border: 0; border-radius: 0; padding: 0 0 24px; background: transparent; }
+.workspace[data-research-workspace="comparison"] :global([data-testid="ue-provenance"]) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+@media (max-width: 1100px) {
+  .reader:global(.lc-reader) { grid-template-columns: 240px minmax(0, 1fr); gap: 16px; }
+  .reader :global(.lc-reader-body) { padding: 20px; }
+  .reader :global(.lc-reader-meta) { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .reader:global(.lc-reader) { grid-template-columns: minmax(0, 1fr); }
+  .reader :global(.lc-reader-list) { position: static; max-height: 260px; }
+  .evidenceNav button { flex-basis: 40%; }
+}

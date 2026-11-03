@@ -1,0 +1,169 @@
+node_modules
+.next/
+tsconfig.tsbuildinfo
+out
+.vercel
+.env
+.env.local
+.env*.local
+.env.*.local
+.local/
+.playwright-mcp/
+# Local Playwright CLI session state and release staging
+.playwright-cli/
+.release-*/
+/release/
+# Test temp artifacts
+.tmp/
+# Local smoke / audit / debug output
+output/
+# Browser profiles and private local states
+.alpha-browser-profile/
+**/.alpha-browser-profile/
+.playwright-profile/
+**/.playwright-profile/
+radar-research/
+radar-browser-profile/
+*.har
+*.log
+cookies.json
+storageState.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local Prisma SQLite database
+prisma/dev.db
+prisma/dev.db-journal
+prisma/*.db
+prisma/*.db-journal
+# Local dated DB snapshots (e.g. dev.db.empty-tasks.20260806); pattern requires a
+# dot suffix so the live prisma/dev.db is never masked.
+prisma/dev.db.*
+
+
+# Local debug artifacts
+.real_api_result.json
+.api_result.json
+.gen_result.txt
+.mock_dev_*.txt
+.real_dev_*.txt
+.dev_*.txt
+.start_check_*.txt
+.build_*.txt
+.page_test.html
+.server_check.html
+.test*.html
+fix_*.py
+test_*.py
+
+# Phase 1 隔离验收 runtime（真实数据副本 + 隔离 EvidenceStore，属运行时数据 — never commit）
+.runtime/
+
+# DB Protection — local backups and audit logs
+.local-backups/
+logs/
+
+# Demo access credentials (contains password hashes — do not commit)
+data/demo-access.json
+# Demo sandbox data (contains demo user tasks/candidates — do not commit)
+data/demo-sandbox.json
+# Demo sandbox product batches (Visitor demo runtime data — do not commit)
+data/demo-product-batches/
+# Product Source Layer V1.2 来源证据库（含采集包、版本历史与审计，属运行时数据 — do not commit）
+data/source-layer-store/
+# Local env backups (may contain real secrets — never commit)
+.env.local.bak-*
+.env.local.bak-corrupt-*
+# Env files by environment (currently absent — prevent accidental commits)
+.env.production
+.env.development
+.env.test
+# Local/demo security gate test artifacts
+data/demo-sandbox.test-system-recovery3.json
+# Private AI image drafts and request ledger
+data/ai-image-drafts/
+# Short-lived standalone Studio result manifests
+data/studio-image-results/
+data/studio-listing-results/
+
+# Legacy purge DB backups (never committed)
+prisma/backups/
+
+# (removed) V4 Replay bundles are RELEASED with the repo: public Replay serves committed,
+# hash-verified desensitized bundles from data/replay-bundles/
+
+# Public Replay 演示沙盒选择（访客运行时数据，非案例）
+data/replay-demo-choices/
+
+# Formal v2 local collection and audit artifacts — never commit
+/tmp/
+/start-local-r11.txt
+
+# 回滚备份目录（保留本地，不提交）
+archives/
+
+# Local debug artifacts
+scratch/
+temp/
+debug/
+*.tmp.ts
+*.tmp.js
+
+# Local-only audit / closeout reports (machine memory, never commit)
+# 2026-09-19: audit reports from Product Source Layer data-fix & closeout audit cycle
+Product_Source_*.md
+V5_PRODUCT_ARCHITECTURE_AUDIT.md
+
+# 2026-09-19: Git submission / pre-commit / ops review reports (PR F1 hygiene)
+FINAL_OPS_REVIEW.md
+Git_Submission_Plan.md
+PRE_COMMIT_CHECK_REPORT.md
+
+# Local debug HTML snapshots (Playwright / curl 临时产物)
+tmp-source.html
+
+# Test artifacts
+coverage/
+test-results/
+playwright-report/
+
+# Local sqlite files
+
+# Distribution and build archives
+dist/
+*.tar.gz
+
+# 2026-10-06 P0 清理（仓库状态审计发现的两处唯一未忽略缺口）
+# 代理工作记忆（本机路径/端口/流程笔记，非仓库内容）
+.workbuddy/
+# 游离目录（脚本在错误 cwd 下生成的 output/ 副本，非仓库结构）
+
+# Isolated UI review build
+/.next-ui-review/
+
+/.next-ui-acceptance/
+
+# Local isolated preview builds are generated artifacts.
+/.next-*/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Local restore drills
+restore-drill*/
+
+# User-provided taxonomy inputs/outputs (must not be committed)
+data/amazon-taxonomy/amazon-us-browse-tree.raw.v1.json
+data/amazon-taxonomy/amazon-us-browse-tree.sellersprite-supplement.v1.json
+data/amazon-taxonomy/zh-phrase-overrides.v1.json
+data/amazon-taxonomy/zh-terms*.v1.json
+data/amazon-taxonomy/amazon-node-id-verification.v1.json
+data/amazon-taxonomy/official-taxonomy-diff.v1.json
+data/amazon-taxonomy/amazon-us-taxonomy-stats.v1.json
+data/amazon-taxonomy/amazon-us-taxonomy-report.md
+# Generated locally by scripts/taxonomy/ensure-empty-taxonomy.mjs (never commit)
+data/amazon-taxonomy/amazon-us-taxonomy.v1.json
+data/amazon-taxonomy/zh-presentation.v1.json

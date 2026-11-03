@@ -1,0 +1,73 @@
+{
+  "name": "lightchoice-workbench",
+  "version": "2.2.16",
+  "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p 3010",
+    "dev:local": "node scripts/dev/local-next-runtime.mjs dev",
+    "build": "next build --webpack",
+    "start": "next start -H 127.0.0.1 -p 3010",
+    "start:local": "node scripts/dev/local-next-runtime.mjs start",
+    "check:local": "node scripts/dev/local-next-runtime.mjs check",
+    "check:provider-config": "node scripts/ops/provider-preflight.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "sellersprite:preview": "tsx tools/upstream/sellersprite-preview.ts",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio",
+    "db:summary": "node scripts/ops/db/protect-sqlite-db.mjs summary",
+    "db:backup": "node scripts/ops/db/protect-sqlite-db.mjs backup",
+    "db:predeploy": "node scripts/ops/db/protect-sqlite-db.mjs predeploy",
+    "db:postdeploy": "node scripts/ops/db/protect-sqlite-db.mjs postdeploy",
+    "check": "npm run lint && npm run test && npm run build",
+    "prepare": "node scripts/taxonomy/ensure-empty-taxonomy.mjs && husky",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "predev": "node scripts/taxonomy/ensure-empty-taxonomy.mjs",
+    "prebuild": "node scripts/taxonomy/ensure-empty-taxonomy.mjs",
+    "pretest": "node scripts/taxonomy/ensure-empty-taxonomy.mjs"
+  },
+  "dependencies": {
+    "@prisma/client": "5.22.0",
+    "@tanstack/react-table": "^8.21.3",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.468.0",
+    "next": "16.3.0",
+    "openai": "^6.39.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^3.10.1",
+    "sharp": "0.35.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "autoprefixer": "^10.4.20",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.7",
+    "playwright": "^1.63.0",
+    "postcss": "^8.4.49",
+    "prisma": "5.22.0",
+    "tailwindcss": "^3.4.17",
+    "tsx": "4.23.1",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.9"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix"
+    ]
+  },
+  "description": "Evidence-driven Amazon product research & development workbench (LightChoice Workbench)."
+}

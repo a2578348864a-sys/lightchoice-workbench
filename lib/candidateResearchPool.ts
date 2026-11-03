@@ -1,0 +1,283 @@
+import { buildCandidateResearchHref } from "@/lib/client/sellerSpriteImportWorkflow";
+import { collectPagedTasks } from "@/lib/researchLifecycle";
+import type {
+  CandidateResearchAction,
+  CandidateResearchBlockReasonCode,
+} from "@/lib/server/candidateResearchEligibility";
+
+export type CandidateResearchStatus =
+  | "pending"
+  | "worth_analyzing"
+  | "analyzed"
+  | "paused"
+  | "rejected";
+
+export type CandidateResearchSourceKind =
+  | "sellersprite_direct"
+  | "product_batch"
+  | "manual"
+  | "other";
+
+export type CandidateResearchPoolItem = {
+  id: string;
+  name: string;
+  status: CandidateResearchStatus;
+  sourceKind: CandidateResearchSourceKind;
+  marketplace: string | null;
+  convertedTaskId: string | null;
+  researchAction: CandidateResearchAction;
+  researchBlockReasonCode: CandidateResearchBlockReasonCode | null;
+  researchActionMessage: string | null;
+  researchDecision: CandidateResearchDecisionSummary | null;
+  updatedAt: string;
+  /** 服务端权威解析的身份绑定真实缓存主图可用性（不允许外链；仅同源 /api 引用）。 */
+  imageAvailable: boolean;
+  imageUrl: string | null;
+};
+
+export type CandidateResearchDecisionSummary =
+  | {
+      schema: "product-research-record.v1";
+      status: "creative_ready" | "needs_information" | "abandoned";
+      label: string;
+      reasonSummary: string;
+      nextActionSummary: string | null;
+      revision: number;
+      decidedAt: string;
+      legacy: false;
+    }
+  | {
+      schema: null;
+      status: null;
+      label: "旧版研究记录";
+      reasonSummary: "";
+      nextActionSummary: null;
+      revision: null;
+      decidedAt: null;
+      legacy: true;
+    };
+
+export type CandidateResearchPoolPage = {
+  items: CandidateResearchPoolItem[];
+  total: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+};
+
+const STATUS = new Set<CandidateResearchStatus>([
+  "pending",
+  "worth_analyzing",
+  "analyzed",
+  "paused",
+  "rejected",
+]);
+const SOURCE_KIND = new Set<CandidateResearchSourceKind>([
+  "sellersprite_direct",
+  "product_batch",
+  "manual",
+  "other",
+]);
+const RESEARCH_ACTION = new Set<CandidateResearchAction>([
+  "converted",
+  "research_available",
+  "research_blocked",
+  "runtime_validation_required",
+]);
+const RESEARCH_BLOCK_REASON = new Set<CandidateResearchBlockReasonCode>([
+  "candidate_paused",
+  "candidate_rejected",
+  "candidate_not_ready",
+  "source_contract_invalid",
+  "research_gate_blocked",
+]);
+const SAFE_ID = /^[A-Za-z0-9_-]{1,120}$/u;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function text(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.normalize("NFC").trim().replace(/\s+/gu, " ");
+  return normalized && normalized.length <= maxLength ? normalized : null;
+}
+
+function parseResearchDecision(value: unknown): CandidateResearchDecisionSummary | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value) || typeof value.legacy !== "boolean") return null;
+  if (value.legacy === true) {
+    return value.schema === null
+      && value.status === null
+      && value.label === "旧版研究记录"
+      && value.reasonSummary === ""
+      && value.nextActionSummary === null
+      && value.revision === null
+      && value.decidedAt === null
+      ? {
+          schema: null,
+          status: null,
+          label: "旧版研究记录",
+          reasonSummary: "",
+          nextActionSummary: null,
+          revision: null,
+          decidedAt: null,
+          legacy: true,
+        }
+      : null;
+  }
+  const statuses = new Set(["creative_ready", "needs_information", "abandoned"]);
+  const label = text(value.label, 32);
+  const reasonSummary = text(value.reasonSummary, 240);
+  const nextActionSummary = value.nextActionSummary === null ? null : text(value.nextActionSummary, 240);
+  const decidedAt = text(value.decidedAt, 40);
+  if (value.schema !== "product-research-record.v1"
+    || typeof value.status !== "string"
+    || !statuses.has(value.status)
+    || !label
+    || !reasonSummary
+    || (value.nextActionSummary !== null && !nextActionSummary)
+    || !Number.isSafeInteger(value.revision)
+    || Number(value.revision) < 1
+    || !decidedAt
+    || Number.isNaN(Date.parse(decidedAt))) return null;
+  return {
+    schema: "product-research-record.v1",
+    status: value.status as "creative_ready" | "needs_information" | "abandoned",
+    label,
+    reasonSummary,
+    nextActionSummary,
+    revision: value.revision as number,
+    decidedAt,
+    legacy: false,
+  };
+}
+
+function parseItem(value: unknown): CandidateResearchPoolItem | null {
+  if (!isRecord(value)) return null;
+  const id = text(value.id, 120);
+  const name = text(value.name, 500);
+  const updatedAt = text(value.updatedAt, 40);
+  if (!id || !SAFE_ID.test(id) || !name || !updatedAt || Number.isNaN(Date.parse(updatedAt))) return null;
+  if (!STATUS.has(value.status as CandidateResearchStatus)) return null;
+  if (!SOURCE_KIND.has(value.sourceKind as CandidateResearchSourceKind)) return null;
+  if (!RESEARCH_ACTION.has(value.researchAction as CandidateResearchAction)) return null;
+  const marketplace = value.marketplace === null ? null : text(value.marketplace, 32);
+  if (marketplace === null && value.marketplace !== null) return null;
+  const convertedTaskId = value.convertedTaskId === null || value.convertedTaskId === undefined
+    ? null
+    : text(value.convertedTaskId, 120);
+  if (convertedTaskId !== null && !SAFE_ID.test(convertedTaskId)) return null;
+  const researchBlockReasonCode = value.researchBlockReasonCode === null
+    ? null
+    : text(value.researchBlockReasonCode, 64);
+  if (researchBlockReasonCode !== null
+    && !RESEARCH_BLOCK_REASON.has(researchBlockReasonCode as CandidateResearchBlockReasonCode)) return null;
+  const researchActionMessage = value.researchActionMessage === null
+    ? null
+    : text(value.researchActionMessage, 200);
+  const researchAction = value.researchAction as CandidateResearchAction;
+  if (researchAction === "converted" && convertedTaskId === null) return null;
+  if (researchAction !== "converted" && convertedTaskId !== null) return null;
+  if (researchAction === "research_blocked"
+    ? researchBlockReasonCode === null || researchActionMessage === null
+    : researchBlockReasonCode !== null) return null;
+  if (researchAction === "runtime_validation_required" && researchActionMessage === null) return null;
+  const researchDecision = parseResearchDecision(value.researchDecision);
+  if (value.researchDecision !== null && value.researchDecision !== undefined && !researchDecision) return null;
+  if (researchAction !== "converted" && researchDecision !== null) return null;
+  return {
+    id,
+    name,
+    status: value.status as CandidateResearchStatus,
+    sourceKind: value.sourceKind as CandidateResearchSourceKind,
+    marketplace,
+    convertedTaskId,
+    researchAction,
+    researchBlockReasonCode: researchBlockReasonCode as CandidateResearchBlockReasonCode | null,
+    researchActionMessage,
+    researchDecision,
+    updatedAt,
+    imageAvailable: value.imageAvailable === true,
+    imageUrl: parseSafeImageUrl(value.imageUrl),
+  };
+}
+
+/** 只接受同源 Candidate 图片引用（/api/opportunity-candidates/<id>/image）；外链/其它路径一律 null。 */
+function parseSafeImageUrl(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const trimmed = value.trim();
+  if (/^\/api\/opportunity-candidates\/[A-Za-z0-9_-]{1,128}\/image$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+export function parseCandidateListResponse(value: unknown): CandidateResearchPoolPage | null {
+  if (!isRecord(value) || value.ok !== true || !Array.isArray(value.items)) return null;
+  if (!Number.isInteger(value.total) || (value.total as number) < 0 || typeof value.hasMore !== "boolean") return null;
+  const nextOffset = value.nextOffset === null ? null : value.nextOffset;
+  if (nextOffset !== null && (!Number.isInteger(nextOffset) || (nextOffset as number) < 0)) return null;
+  const items = value.items.map(parseItem);
+  if (items.some((item) => item === null)) return null;
+  return {
+    items: items as CandidateResearchPoolItem[],
+    total: value.total as number,
+    hasMore: value.hasMore,
+    nextOffset: nextOffset as number | null,
+  };
+}
+
+export function mergeCandidatePages(
+  current: readonly CandidateResearchPoolItem[],
+  incoming: readonly CandidateResearchPoolItem[],
+): CandidateResearchPoolItem[] {
+  const byId = new Map(current.map((item) => [item.id, item]));
+  for (const item of incoming) byId.set(item.id, item);
+  return Array.from(byId.values());
+}
+
+export function candidatePrimaryHref(
+  item: Pick<CandidateResearchPoolItem, "id" | "convertedTaskId" | "researchAction">,
+): string | null {
+  if (item.researchAction === "converted"
+    && item.convertedTaskId
+    && SAFE_ID.test(item.convertedTaskId)) {
+    return `/tasks/${encodeURIComponent(item.convertedTaskId)}`;
+  }
+  // 可进入研究的唯一权威判定：research_available（普通候选）与
+  // runtime_validation_required（SellerSprite ProductBatch 候选：允许研究，
+  // 进入研究时由服务端再次校验来源）都可进入候选研究页。
+  if (item.researchAction === "research_available"
+    || item.researchAction === "runtime_validation_required") {
+    return buildCandidateResearchHref(item.id);
+  }
+  return null;
+}
+
+/**
+ * 研究池「可进入研究」唯一权威语义（与 candidatePrimaryHref 一致）。
+ * UI 标签（status→「待研究」）只表示候选状态，不等于可研究；
+ * 一切「开始／继续研究」入口必须复用本判断。
+ */
+export function isCandidateResearchActionAvailable(
+  item: Pick<CandidateResearchPoolItem, "researchAction">,
+): boolean {
+  return item.researchAction === "research_available"
+    || item.researchAction === "runtime_validation_required";
+}
+
+/* ── 轮 7：可研究口径与 fail-closed 收集 ── */
+
+/** 可研究唯一依据：isCandidateResearchActionAvailable（展示状态不算服务端授权）。 */
+export function filterStartableCandidates(items: readonly CandidateResearchPoolItem[]): CandidateResearchPoolItem[] {
+  return items.filter((item) => isCandidateResearchActionAvailable(item));
+}
+
+/**
+ * 完整分页收集可研究候选（fail-closed：任一页失败/结构无效/超上限 → 抛错，不返回残缺列表）。
+ * 页码保护上限 200 页（=10000 条）。
+ */
+export async function collectStartableCandidates(
+  fetchPage: (offset: number) => Promise<{ items: CandidateResearchPoolItem[]; hasMore: boolean } | null>,
+): Promise<CandidateResearchPoolItem[]> {
+  const all = await collectPagedTasks<CandidateResearchPoolItem>(fetchPage);
+  return filterStartableCandidates(all);
+}

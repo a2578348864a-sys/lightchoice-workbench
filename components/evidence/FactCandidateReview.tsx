@@ -1,0 +1,854 @@
+"use client";
+
+/**
+ * V3 UX Closure — Fact Candidate Review（商品事实候选确认）
+ *
+ * 系统从确定性证据（SellerSprite / Amazon 页面 / 商品标题）提取「事实候选」，
+ * 用户勾选/取消/修改后批量确认——确认即成为本任务的 Confirmed Fact（Human Confirmation
+ * Authority，独立 fact-candidates writer）。
+ *
+ * 安全语义：
+ * - 候选来源固定为确定性证据；AI/VOC/竞品/供应商声称不会出现在这里；
+ * - 「确认」是人类对候选值的核实（可修改），不是 AI 升权；
+ * - 已确认事实显示来源（seller_sprite / amazon_browser / product_title），不再重复确认。
+ */
+import { useCallback, useEffect, useState } from "react";
+import { CheckCircle2, Loader2, Plus, Sparkles } from "lucide-react";
+import { buildAccessHeaders } from "@/lib/client/accessToken";
+import {
+  MANUAL_FACT_FIELDS,
+  factCategoryOf,
+  humanManualCandidateId,
+} from "@/lib/factCandidates";
+
+type FactCandidateView = {
+  candidateId: string;
+  field: string;
+  label: string;
+  value: string | number;
+  sourceKind: "seller_sprite_product_facts" | "amazon_browser_evidence" | "amazon_product_info" | "product_title" | "human_manual";
+  sourceRef: string;
+  /** V3R（契约③ PROVENANCE_MERGE）：同字段其他来源的并列值（多 Provenance 保留，供人工核对） */
+  alternateSources?: Array<{ sourceKind: string; sourceRef: string; value: string | number }>;
+};
+
+type ConfirmedFactView = FactCandidateView & { confirmedAt: string; confirmedBy: string };
+
+type AmazonSourceReview = {
+  previewId: string;
+  matchingConfirmedFacts: Array<{
+    field: string;
+    label: string;
+    value: string | number;
+    sourceKind: string;
+    sourceRef: string;
+    confirmedValue: string | number;
+    confirmedSourceKind: string;
+    amazonSourceConfirmed: boolean;
+  }>;
+  newFacts: Array<{ field: string; label: string; value: string | number; sourceKind: string; sourceRef: string }>;
+  conflicts: Array<{
+    field: string;
+    label: string;
+    value: string | number;
+    sourceKind: string;
+    sourceRef: string;
+    confirmedValue: string | number;
+    confirmedSourceKind: string;
+  }>;
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  seller_sprite_product_facts: "SellerSprite 商品数据",
+  amazon_browser_evidence: "Amazon 页面证据",
+  product_title: "商品标题（自动识别）",
+  amazon_product_info: "Amazon 商品规格",
+  human_manual: "人工核实（手动补充）",
+};
+
+// V3R（契约④ MARKET_OBSERVATION）：候选/已确认按事实类别分组展示——
+// 商品事实（product_fact）为主区；市场观察（价格/评分/评论数/BSR/类目）独立成区，
+// 明确其「市场状态观察」语义（确认后不进 Listing，仅作市场参考）。
+const MARKET_OBSERVATION_GROUP_LABEL = "市场观察（价格/评分/评论数/BSR/类目，不进 Listing）";
+
+function groupByCategory<T extends { field: string }>(items: ReadonlyArray<T>): {
+  productFacts: T[];
+  marketObservations: T[];
+} {
+  const productFacts: T[] = [];
+  const marketObservations: T[] = [];
+  for (const item of items) {
+    if (factCategoryOf(item.field) === "market_observation") marketObservations.push(item);
+    else productFacts.push(item);
+  }
+  return { productFacts, marketObservations };
+}
+
+function buildFetchHeaders(extra?: Record<string, string>): Headers {
+  return new Headers({ ...buildAccessHeaders(), ...extra });
+}
+
+// ── V3 Final HWF：Selection Preservation（导出纯函数，供测试） ──
+// 批量确认后只移除「已成功确认」的勾选；冲突项保留待复核（任务书 §12）。
+export function preserveSelectionAfterConfirm(
+  selected: ReadonlySet<string>,
+  conflictCandidateIds: ReadonlySet<string>,
+): Set<string> {
+  const next = new Set<string>();
+  for (const id of selected) {
+    if (conflictCandidateIds.has(id)) next.add(id);
+  }
+  return next;
+}
+
+// 刷新后清理「候选/已确认中已不存在」的勾选项（candidate_missing 场景），其余保留用户意图。
+export function pruneSelectionToAlive(
+  selected: ReadonlySet<string>,
+  aliveCandidateIds: ReadonlySet<string>,
+): Set<string> {
+  const next = new Set<string>();
+  for (const id of selected) {
+    if (aliveCandidateIds.has(id)) next.add(id);
+  }
+  return next;
+}
+
+/**
+ * V3R（契约⑥ FACT_SELECTION）：候选全选的可见可选项。
+ * 候选均为「已验证/未确认/未阻断/无冲突」的待确认项（服务端已保证），
+ * 故 selectable = 当前候选集合；已确认项不在候选列表，天然不参与全选。
+ */
+/** LISTING_FINAL_CLOSURE：高风险候选（功能/清洁/保温/认证/性能/时长类）不得被一键全选自动选中，必须逐项人工确认 */
+export const HIGH_RISK_FACT_FIELDS = new Set<string>([
+  "functional_feature",
+  "care",
+  "cleaning",
+  "insulation",
+  "certification",
+  "performance",
+  "duration",
+  "compatibility",
+  "operation",
+  "construction",
+]);
+
+export function selectableCandidateIds(candidates: ReadonlyArray<Pick<FactCandidateView, "candidateId"> & { field?: string }>): Set<string> {
+  const out = new Set<string>();
+  for (const c of candidates) {
+    if (c.field && HIGH_RISK_FACT_FIELDS.has(c.field)) continue;
+    out.add(c.candidateId);
+  }
+  return out;
+}
+
+/** 全选状态：all=全部可选已选中；some=部分选中（indeterminate）；none=未选中 */
+export function selectAllState(
+  selected: ReadonlySet<string>,
+  selectable: ReadonlySet<string>,
+): "all" | "some" | "none" {
+  if (selectable.size === 0) return "none";
+  let hit = 0;
+  for (const id of selectable) {
+    if (selected.has(id)) hit += 1;
+  }
+  if (hit === selectable.size) return "all";
+  if (hit > 0) return "some";
+  return "none";
+}
+
+export function FactCandidateReview({
+  taskId,
+  storageVersion,
+  onChanged,
+  refreshToken = 0,
+  showRecoveryTrigger = true,
+}: {
+  taskId: string;
+  storageVersion: { resultJsonHash: string; updatedAt: string } | null;
+  onChanged: () => void;
+  /** 研究资料编排完成后递增，重新读取服务端候选与确认事实。 */
+  refreshToken?: number;
+  /** 统一入口启用时隐藏历史的局部补齐按钮。 */
+  showRecoveryTrigger?: boolean;
+}) {
+  const [candidates, setCandidates] = useState<FactCandidateView[] | null>(null);
+  const [confirmed, setConfirmed] = useState<ConfirmedFactView[] | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [editedValues, setEditedValues] = useState<Record<string, string | number>>({});
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [amazonSourceReview, setAmazonSourceReview] = useState<AmazonSourceReview | null>(null);
+  const [factStorageVersion, setFactStorageVersion] = useState(storageVersion);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  // V3 UX Closure Manual Fact：手动补充商品事实（SYSTEM CANNOT EXTRACT → 用户手动补充）
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualField, setManualField] = useState(MANUAL_FACT_FIELDS[0]?.field ?? "");
+  const [manualValue, setManualValue] = useState("");
+  const [manualNote, setManualNote] = useState("");
+  const openAmazonSourceEvidence = useCallback(() => {
+    const target = document.getElementById("amazon-source-evidence");
+    if (!(target instanceof HTMLDetailsElement)) return;
+    target.open = true;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    target.focus();
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/fact-candidates`, {
+        method: "GET",
+        headers: buildFetchHeaders(),
+        cache: "no-store",
+      });
+      const json = await res.json() as
+        | { ok: true; data: { candidates: FactCandidateView[]; confirmed: ConfirmedFactView[]; storageVersion: { resultJsonHash: string; updatedAt: string }; amazonSourceReview?: AmazonSourceReview | null } }
+        | { ok: false; error?: { message?: string } };
+      if (!res.ok || !json.ok) {
+        setError((json as { error?: { message?: string } }).error?.message ?? "无法读取待确认商品事实。");
+        return;
+      }
+      setCandidates(json.data.candidates);
+      setConfirmed(json.data.confirmed);
+      setFactStorageVersion(json.data.storageVersion);
+      setAmazonSourceReview(json.data.amazonSourceReview ?? null);
+      const hasAmazonPending = Boolean(
+        json.data.amazonSourceReview && (
+          json.data.amazonSourceReview.matchingConfirmedFacts.some((f) => !f.amazonSourceConfirmed) ||
+          json.data.amazonSourceReview.newFacts.length > 0
+        )
+      );
+      if (typeof window !== "undefined" && window.location.hash === "#fact-candidate-review") {
+        setDetailsOpen(true);
+      }
+      // V3 Final HWF：Selection Preservation——候选已不存在的勾选项清理（其余保留用户意图）
+      const alive = new Set<string>();
+      for (const c of json.data.candidates) alive.add(c.candidateId);
+      for (const c of json.data.confirmed) alive.add(c.candidateId);
+      setSelected((prev) => pruneSelectionToAlive(prev, alive));
+    } catch {
+      setError("无法读取待确认商品事实，请重试。");
+    } finally {
+      setLoading(false);
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    void load();
+  }, [load, refreshToken]);
+
+  useEffect(() => {
+    function checkHash() {
+      if (typeof window === "undefined") return;
+      if (window.location.hash === "#fact-candidate-review") {
+        setDetailsOpen(true);
+        const el = document.getElementById("fact-candidate-review");
+        if (el && "open" in el) {
+          (el as HTMLDetailsElement).open = true;
+        }
+      }
+    }
+    checkHash();
+    window.addEventListener("hashchange", checkHash);
+    return () => window.removeEventListener("hashchange", checkHash);
+  }, []);
+
+  function toggle(candidateId: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(candidateId)) next.delete(candidateId);
+      else next.add(candidateId);
+      return next;
+    });
+  }
+
+  /** 服务端批量确认响应（V3 Final HWF：Safe Rebase / Partial Conflict / 幂等） */
+  type ConfirmResponse =
+    | { ok: true; data: { confirmedCount: number; alreadyConfirmedCount?: number; conflicts?: Array<{ candidateId: string; label: string; reason: "candidate_missing" | "value_changed" }> } }
+    | { ok: false; error?: { code?: string; message?: string; conflicts?: Array<{ candidateId: string; label: string; reason: string }> } };
+
+  function applyConfirmOutcome(json: ConfirmResponse) {
+    if (!json.ok) return;
+    const data = json.data;
+    const conflicts = data.conflicts ?? [];
+    const conflictIds = new Set(conflicts.map((c) => c.candidateId));
+    // Selection Preservation：只移除已成功确认的项；冲突项保留勾选待复核
+    setSelected((prev) => preserveSelectionAfterConfirm(prev, conflictIds));
+    setEditedValues((prev) => {
+      const next: Record<string, string | number> = {};
+      for (const [id, value] of Object.entries(prev)) {
+        if (conflictIds.has(id)) next[id] = value;
+      }
+      return next;
+    });
+    if (conflicts.length > 0) {
+      setError(
+        data.confirmedCount > 0
+          ? `已确认 ${data.confirmedCount} 条。另外 ${conflicts.length} 条资料刚发生变化，请检查后重新确认。`
+          : "这几条商品资料刚发生变化，系统没有替你确认。请检查最新内容后再确认。",
+      );
+      setNotice("");
+    } else {
+      const already = data.alreadyConfirmedCount ?? 0;
+      setNotice(
+        data.confirmedCount > 0
+          ? `已确认 ${data.confirmedCount} 项（含市场观察；商品事实与市场观察分开展示）。${already > 0 ? `（${already} 项已确认过，未重复写入）` : ""}`
+          : `${already > 0 ? `已确认过 ${already} 项（未重复写入）。` : "没有新的商品事实需要确认。"}`,
+      );
+      setError("");
+    }
+  }
+
+  async function confirmSelected() {
+    if (selected.size === 0 || !factStorageVersion) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const selections = [...selected].map((candidateId) => {
+        const candidate = candidates?.find((c) => c.candidateId === candidateId);
+        const editedValue = editedValues[candidateId];
+        const edited = editedValue !== undefined && editedValue !== String(candidate?.value);
+        return {
+          candidateId,
+          confirmed: true,
+          value: editedValue ?? candidate?.value,
+          ...(edited ? { edited: true } : {}),
+        };
+      });
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/fact-candidates`, {
+        method: "POST",
+        headers: buildFetchHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ selections, expectedStorageVersion: factStorageVersion }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const json = await res.json() as ConfirmResponse;
+      if (!res.ok || !json.ok) {
+        const error = (json as { error?: { code?: string; message?: string; conflicts?: unknown[] } }).error ?? {};
+        if (error.code === "task_result_conflict") {
+          // 服务端已自动 Safe Rebase 过一次仍冲突（真实并发竞态）→ 刷新最新状态，不要求重新勾选
+          setError("内容刚刚发生变化，请刷新后重试。");
+          onChanged();
+          return;
+        }
+        if (error.code === "fact_conflict") {
+          setError("这几条商品资料刚发生变化，系统没有替你确认。请检查最新内容后再确认。");
+          await load();
+          onChanged();
+          return;
+        }
+        setError(error.message ?? "确认失败，请重试。");
+        return;
+      }
+      applyConfirmOutcome(json);
+      await load();
+      onChanged();
+    } catch {
+      setError("确认失败，请重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  type AmazonSourceConfirmResponse =
+    | { ok: true; data: { confirmedCount: number; alreadyConfirmedCount?: number } }
+    | { ok: false; error?: { code?: string; message?: string } };
+
+  async function confirmAmazonSource() {
+    if (!factStorageVersion || !amazonSourceReview) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/fact-candidates`, {
+        method: "POST",
+        headers: buildFetchHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          amazonSourceConfirmation: { previewId: amazonSourceReview.previewId },
+          expectedStorageVersion: factStorageVersion,
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const json = await res.json() as AmazonSourceConfirmResponse;
+      if (!res.ok || !json.ok) {
+        setError(json.ok ? "Amazon 页面证据确认失败，请刷新后重试。" : (json.error?.message ?? "Amazon 页面证据确认失败，请刷新后重试。"));
+        if (!json.ok && (json.error?.code === "task_result_conflict" || json.error?.code === "preview_not_found")) await load();
+        return;
+      }
+      setNotice("已确认 Amazon 页面证据；原事实值未改变，Amazon 来源已补充并完成闭环。");
+      await load();
+      onChanged();
+    } catch {
+      setError("Amazon 页面证据确认失败，请重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addManualFact() {
+    if (!factStorageVersion) return;
+    const field = manualField.trim();
+    const value = manualValue.trim();
+    if (!field || !value) {
+      setError("请选择事实类型并填写事实值。");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/fact-candidates`, {
+        method: "POST",
+        headers: buildFetchHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          selections: [{
+            candidateId: humanManualCandidateId(field),
+            confirmed: true,
+            value,
+          }],
+          expectedStorageVersion: factStorageVersion,
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const json = await res.json() as ConfirmResponse;
+      if (!res.ok || !json.ok) {
+        const error = (json as { error?: { code?: string; message?: string } }).error ?? {};
+        if (error.code === "task_result_conflict") {
+          // 服务端已自动 Safe Rebase 过一次仍冲突（真实并发竞态）→ 刷新最新状态，不要求重新添加
+          setError("内容刚刚发生变化，请刷新后重试。");
+          onChanged();
+          return;
+        }
+        if (error.code === "fact_conflict") {
+          setError("这条商品资料刚发生变化，系统没有替你确认。请检查最新内容后再添加。");
+          await load();
+          onChanged();
+          return;
+        }
+        setError(error.message ?? "添加失败，请重试。");
+        return;
+      }
+      applyConfirmOutcome(json);
+      setManualValue("");
+      setManualNote("");
+      setManualOpen(false);
+      await load();
+      onChanged();
+    } catch {
+      setError("添加失败，请重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading && candidates === null && confirmed === null) {
+    return (
+      <details id="fact-candidate-review" className="mt-4 scroll-mt-6 rounded-2xl border border-slate-200/90 bg-white shadow-xs overflow-hidden" data-testid="fact-candidate-review">
+        <summary className="cursor-pointer bg-slate-50/70 px-4 py-3 text-sm font-semibold text-slate-800 hover:bg-slate-100/70 transition-colors flex items-center justify-between select-none">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-slate-900">商品事实确认</span>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
+              正在整理…
+            </span>
+          </div>
+          <span className="text-xs font-normal text-slate-400">点击展开</span>
+        </summary>
+        <div className="p-4 text-sm text-slate-500 border-t border-slate-100" data-testid="fact-candidates-loading">
+          <Loader2 className="mr-1 inline size-4 animate-spin" /> 正在从研究证据整理待确认商品事实…
+        </div>
+      </details>
+    );
+  }
+
+  const hasPendingAmazonEvidence = Boolean(
+    amazonSourceReview && (
+      amazonSourceReview.matchingConfirmedFacts.some((item) => !item.amazonSourceConfirmed) ||
+      amazonSourceReview.newFacts.length > 0
+    )
+  );
+  const total = (candidates?.length ?? 0) + (confirmed?.length ?? 0);
+  if (total === 0 && !amazonSourceReview && !error) {
+    return (
+      <details
+        id="fact-candidate-review"
+        open={detailsOpen}
+        onToggle={(e) => setDetailsOpen(e.currentTarget.open)}
+        className="mt-4 scroll-mt-6 rounded-2xl border border-slate-200/90 bg-white shadow-xs overflow-hidden"
+        data-testid="fact-candidate-review"
+      >
+        <summary className="cursor-pointer bg-slate-50/70 px-4 py-3 text-sm font-semibold text-slate-800 hover:bg-slate-100/70 transition-colors flex items-center justify-between select-none">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-slate-900">商品事实确认</span>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
+              待确认 0 项 · 已确认 0 项
+            </span>
+          </div>
+          <span className="text-xs font-normal text-slate-400">点击展开</span>
+        </summary>
+        <div className="p-4 text-sm text-slate-500 border-t border-slate-100" data-testid="fact-candidates-empty">
+          暂无待确认商品事实（来源：SellerSprite 商品数据 / Amazon 原始页面证据 / 商品标题）。
+        </div>
+      </details>
+    );
+  }
+
+  const pendingCount = (candidates?.length ?? 0) + (hasPendingAmazonEvidence ? 1 : 0);
+  const confirmedCount = confirmed?.length ?? 0;
+
+  return (
+    <details
+      id="fact-candidate-review"
+      open={detailsOpen}
+      onToggle={(e) => setDetailsOpen(e.currentTarget.open)}
+      className="mt-4 scroll-mt-6 rounded-2xl border border-slate-200/90 bg-white shadow-xs overflow-hidden"
+      data-testid="fact-candidate-review"
+    >
+      <summary className="cursor-pointer bg-slate-50/70 px-4 py-3 text-sm font-semibold text-slate-800 hover:bg-slate-100/70 transition-colors flex items-center justify-between select-none">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-slate-900">商品事实确认</span>
+          <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600">
+            待确认 {pendingCount} 项 · 已确认 {confirmedCount} 项
+          </span>
+        </div>
+        <span className="text-xs font-normal text-slate-400">
+          点击展开核对或补充商品事实
+        </span>
+      </summary>
+      <div className="p-4 sm:p-5 border-t border-slate-100 space-y-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-slate-500">
+            系统从已有研究证据提取以下候选；勾选并确认后即成为本任务已确认事实。
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {showRecoveryTrigger ? (
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => setNotice("请使用上方「补齐研究资料」统一采集 Amazon 商品资料。")}
+                className="inline-flex items-center gap-1 rounded-lg border border-sky-300 bg-sky-50 px-2.5 py-1 text-xs sm:text-sm font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50 transition-colors"
+                data-testid="smart-recovery-trigger"
+              >
+                <Sparkles className="size-3.5" />
+                ✨ 智能补齐商品资料
+              </button>
+            ) : null}
+            <button
+              type="button"
+              disabled={saving || selected.size === 0}
+              onClick={() => void confirmSelected()}
+              className="inline-flex items-center gap-1 rounded-lg border border-teal-300 bg-teal-50 px-2.5 py-1 text-xs sm:text-sm font-semibold text-teal-700 hover:bg-teal-100 disabled:opacity-50 transition-colors"
+            >
+              {saving ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5" />}
+              确认所选事实（{selected.size}）
+            </button>
+          </div>
+        </div>
+      <p className="mt-1 text-xs text-slate-500">
+        系统从已有研究证据提取以下候选；勾选并「确认」后即成为本任务已确认事实（可修改值，来源保持不变）。
+        Amazon 商品资料由上方「补齐研究资料」统一采集；候选只在服务端读取确定性来源后生成，仍需人工确认。
+        AI 摘要、评论与供应商声称不会自动成为候选。
+      </p>
+      {error && <p className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">{error}</p>}
+      {notice && <p className="mt-2 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-sm text-teal-700">{notice}</p>}
+
+      {amazonSourceReview && (
+        <div className="mt-3 rounded-xl border border-indigo-200 bg-indigo-50/60 px-3 py-3" data-testid="amazon-source-confirmation">
+          <p className="text-sm font-bold text-indigo-900">Amazon 页面证据待确认</p>
+          {amazonSourceReview.matchingConfirmedFacts.length > 0 && (
+            <>
+              <p className="mt-1 text-xs leading-5 text-indigo-800">
+                Amazon 本次验证到 {amazonSourceReview.matchingConfirmedFacts.length} 个与你已确认事实一致的字段。确认后不会覆盖现有事实，只会补充 Amazon 来源。
+              </p>
+              <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                {amazonSourceReview.matchingConfirmedFacts.map((item) => (
+                  <li key={`${item.field}:${item.sourceRef}`} className="flex items-start justify-between gap-2 rounded-lg bg-white/70 px-2.5 py-1.5">
+                    <span className="font-semibold">{item.label}</span>
+                    <span>
+                      {String(item.value)}
+                      {item.confirmedValue !== undefined && String(item.value).trim() !== String(item.confirmedValue).trim() && (
+                        <span className="ml-1 font-normal text-[13px] text-slate-500">（当前：{String(item.confirmedValue)}）</span>
+                      )}
+                    </span>
+                    <span className="shrink-0 text-[13px] text-slate-500">Amazon 页面证据</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {amazonSourceReview.newFacts.length > 0 && (
+            <p className="mt-2 text-xs text-amber-800">另有 {amazonSourceReview.newFacts.length} 个新字段，请在下方事实候选中逐项确认。</p>
+          )}
+          {amazonSourceReview.conflicts.length > 0 && (
+            <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-2 text-xs text-rose-800">
+              <p className="font-semibold">Amazon 数据与已确认事实存在冲突，请走下方事实复核，不能直接确认页面证据。</p>
+              <ul className="mt-1 space-y-0.5">
+                {amazonSourceReview.conflicts.map((item) => <li key={`${item.field}:${item.sourceRef}`}>{item.label}：已确认“{String(item.confirmedValue)}”，Amazon 为“{String(item.value)}”</li>)}
+              </ul>
+            </div>
+          )}
+          {amazonSourceReview.matchingConfirmedFacts.length > 0 && amazonSourceReview.newFacts.length === 0 && amazonSourceReview.conflicts.length === 0 && (
+            amazonSourceReview.matchingConfirmedFacts.every((item) => item.amazonSourceConfirmed)
+              ? <p className="mt-2 text-xs font-semibold text-teal-700">Amazon 来源已保留，正在完成预览闭环。</p>
+              : <button
+                type="button"
+                disabled={saving}
+                onClick={() => void confirmAmazonSource()}
+                className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                data-testid="confirm-amazon-source"
+              >
+                {saving ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5" />}
+                确认此 Amazon 页面证据
+              </button>
+          )}
+        </div>
+      )}
+
+      {confirmed && confirmed.length > 0 && (
+        <div className="mt-3">
+          {(() => {
+            const grouped = groupByCategory(confirmed);
+            const marketCount = grouped.marketObservations.length;
+            const productCount = grouped.productFacts.length;
+            return (
+              <p className="text-xs font-bold text-slate-700" data-testid="fact-confirmed-counts">
+                已确认（{confirmed.length}）
+                {productCount > 0 && marketCount > 0
+                  ? `：商品事实 ${productCount} 项 · 市场观察 ${marketCount} 项`
+                  : marketCount > 0
+                    ? `：市场观察 ${marketCount} 项`
+                    : ""}
+              </p>
+            );
+          })()}
+          <ul className="mt-1 space-y-1">
+            {confirmed.map((item) => (
+              <li key={item.candidateId} className="flex items-start justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm" data-testid="fact-confirmed-item">
+                <span className="font-semibold text-slate-800">{item.label}</span>
+                <span className="flex-1 text-right text-slate-700">{item.value}</span>
+                <span className="shrink-0 text-[13px] text-slate-400">来源：{SOURCE_LABELS[item.sourceKind] ?? item.sourceKind}</span>
+              </li>
+            ))}
+          </ul>
+          {(() => {
+            const grouped = groupByCategory(confirmed);
+            if (grouped.marketObservations.length === 0) return null;
+            return (
+              <div className="mt-2 rounded-lg border border-amber-100 bg-amber-50/40 px-3 py-2" data-testid="fact-confirmed-market-observations">
+                <p className="text-[13px] font-bold text-amber-800">{MARKET_OBSERVATION_GROUP_LABEL}</p>
+                <ul className="mt-1 space-y-0.5">
+                  {grouped.marketObservations.map((item) => (
+                    <li key={item.candidateId} className="flex items-start justify-between gap-2 text-sm">
+                      <span className="font-semibold text-slate-800">{item.label}</span>
+                      <span className="flex-1 text-right text-slate-700">{item.value}</span>
+                      <span className="shrink-0 text-[13px] text-slate-400">来源：{SOURCE_LABELS[item.sourceKind] ?? item.sourceKind}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {candidates && candidates.length > 0 && (
+        <div className="mt-3">
+          {(() => {
+            // V3R（契约⑥ FACT_SELECTION）：全选 = 可见/可选/已验证/未确认/未阻断/无冲突的候选
+            const selectable = selectableCandidateIds(candidates);
+            const allState = selectAllState(selected, selectable);
+            const toggleAll = () => {
+              if (allState === "all") {
+                setSelected((prev) => {
+                  const next = new Set(prev);
+                  for (const id of selectable) next.delete(id);
+                  return next;
+                });
+              } else {
+                setSelected((prev) => {
+                  const next = new Set(prev);
+                  for (const id of selectable) next.add(id);
+                  return next;
+                });
+              }
+            };
+            return (
+              <label className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700" data-testid="fact-candidate-select-all">
+                <input
+                  type="checkbox"
+                  checked={allState === "all"}
+                  ref={(element) => {
+                    if (element) element.indeterminate = allState === "some";
+                  }}
+                  onChange={toggleAll}
+                  className="size-4 rounded border-slate-300 text-indigo-600"
+                  aria-label="全选候选事实"
+                />
+                候选（{candidates.length}，高风险属性需逐项勾选确认）
+              </label>
+            );
+          })()}
+          <ul className="mt-1 space-y-1">
+            {(() => {
+              // V3R（契约④）：主列表只展示商品事实候选；市场观察候选在市场观察区展示（避免重复渲染）
+              const grouped = groupByCategory(candidates);
+              return grouped.productFacts.map((item) => (
+              <li key={item.candidateId} className="flex items-start gap-2 rounded-lg border border-slate-100 px-3 py-2 text-sm" data-testid="fact-candidate-item">
+                <input
+                  type="checkbox"
+                  checked={selected.has(item.candidateId)}
+                  onChange={() => toggle(item.candidateId)}
+                  className="mt-1 size-4 rounded border-slate-300 text-indigo-600"
+                  aria-label={`确认 ${item.label}`}
+                />
+                <span className="w-28 shrink-0 font-semibold text-slate-800">{item.label}</span>
+                <span className="flex-1">
+                  <input
+                    type="text"
+                    value={String(editedValues[item.candidateId] ?? item.value)}
+                    onChange={(event) => setEditedValues((prev) => ({ ...prev, [item.candidateId]: event.target.value }))}
+                    className="w-full rounded-md border border-slate-200 px-2 py-1 text-slate-700 focus:border-indigo-400 focus:outline-none"
+                    aria-label={`${item.label} 值（可修改）`}
+                  />
+                  {/* V3R（契约③ PROVENANCE_MERGE）：多来源并列值——不静默丢弃，供人工核对后决定 */}
+                  {item.alternateSources && item.alternateSources.length > 0 ? (
+                    <span className="mt-1 block text-[13px] leading-4 text-amber-700" data-testid="fact-candidate-alternates">
+                      另有来源值：
+                      {item.alternateSources.map((alt) => `${SOURCE_LABELS[alt.sourceKind] ?? alt.sourceKind} ${String(alt.value)}`).join("；")}
+                      （来源不同，确认前请核对）
+                    </span>
+                  ) : null}
+                </span>
+                <span className="shrink-0 text-[13px] text-slate-400" title={item.sourceRef}>
+                  <Sparkles className="mr-0.5 inline size-3" />
+                  {SOURCE_LABELS[item.sourceKind] ?? item.sourceKind}
+                  {item.sourceKind === "amazon_browser_evidence" ? (
+                    <button type="button" onClick={openAmazonSourceEvidence} className="ml-1 underline hover:text-slate-700" data-testid="open-amazon-source-evidence">
+                      查看原始证据
+                    </button>
+                  ) : null}
+                </span>
+              </li>
+              ));
+            })()}
+          </ul>
+          {(() => {
+            const grouped = groupByCategory(candidates);
+            if (grouped.marketObservations.length === 0) return null;
+            return (
+              <div className="mt-2 rounded-lg border border-amber-100 bg-amber-50/40 px-3 py-2" data-testid="fact-candidate-market-observations">
+                <p className="text-[13px] font-bold text-amber-800">{MARKET_OBSERVATION_GROUP_LABEL}</p>
+                <ul className="mt-1 space-y-1">
+                  {grouped.marketObservations.map((item) => (
+                    <li key={item.candidateId} className="flex items-start gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(item.candidateId)}
+                        onChange={() => toggle(item.candidateId)}
+                        className="mt-1 size-4 rounded border-slate-300 text-indigo-600"
+                        aria-label={`确认 ${item.label}`}
+                      />
+                      <span className="w-28 shrink-0 font-semibold text-slate-800">{item.label}</span>
+                      <span className="flex-1">
+                        <input
+                          type="text"
+                          value={String(editedValues[item.candidateId] ?? item.value)}
+                          onChange={(event) => setEditedValues((prev) => ({ ...prev, [item.candidateId]: event.target.value }))}
+                          className="w-full rounded-md border border-slate-200 px-2 py-1 text-slate-700 focus:border-indigo-400 focus:outline-none"
+                          aria-label={`${item.label} 值（可修改）`}
+                        />
+                        {item.alternateSources && item.alternateSources.length > 0 ? (
+                          <span className="mt-1 block text-[13px] leading-4 text-amber-700" data-testid="fact-candidate-alternates">
+                            另有来源值：
+                            {item.alternateSources.map((alt) => `${SOURCE_LABELS[alt.sourceKind] ?? alt.sourceKind} ${String(alt.value)}`).join("；")}
+                            （来源不同，确认前请核对）
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="shrink-0 text-[13px] text-slate-400" title={item.sourceRef}>
+                        <Sparkles className="mr-0.5 inline size-3" />
+                        {SOURCE_LABELS[item.sourceKind] ?? item.sourceKind}
+                        {item.sourceKind === "amazon_browser_evidence" ? (
+                          <button type="button" onClick={openAmazonSourceEvidence} className="ml-1 underline hover:text-slate-700" data-testid="open-amazon-source-evidence">
+                            查看原始证据
+                          </button>
+                        ) : null}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* V3 UX Closure Manual Fact：系统无法提取时，用户手动补充（进入同一 Human Confirmation Authority） */}
+      <div className="mt-4 border-t border-slate-100 pt-3" data-testid="manual-fact-entry">
+        <button
+          type="button"
+          onClick={() => setManualOpen((open) => !open)}
+          className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          aria-expanded={manualOpen}
+        >
+          <Plus className="size-4" aria-hidden="true" />
+          手动补充商品事实
+        </button>
+        {manualOpen && (
+          <div className="mt-3 grid gap-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3 sm:grid-cols-[200px_1fr_auto]">
+            <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+              事实类型
+              <select
+                value={manualField}
+                onChange={(event) => setManualField(event.target.value)}
+                className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-800"
+                data-testid="manual-fact-field"
+              >
+                {MANUAL_FACT_FIELDS.map((entry) => (
+                  <option key={entry.field} value={entry.field}>{entry.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+              事实值
+              <input
+                type="text"
+                value={manualValue}
+                onChange={(event) => setManualValue(event.target.value)}
+                placeholder="例如：304 不锈钢"
+                className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-800"
+                data-testid="manual-fact-value"
+              />
+            </label>
+            <div className="flex items-end gap-2">
+              <input
+                type="text"
+                value={manualNote}
+                onChange={(event) => setManualNote(event.target.value)}
+                placeholder="可选备注"
+                className="hidden w-32 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-800 sm:block"
+                aria-label="可选备注"
+              />
+              <button
+                type="button"
+                disabled={saving || !manualValue.trim()}
+                onClick={() => void addManualFact()}
+                className="inline-flex h-9 items-center gap-1 rounded-lg border border-teal-300 bg-teal-50 px-3 text-sm font-semibold text-teal-700 hover:bg-teal-100 disabled:opacity-50"
+                data-testid="manual-fact-add"
+              >
+                {saving ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+                添加并确认
+              </button>
+            </div>
+            <p className="text-[13px] leading-5 text-slate-400 sm:col-span-3">
+              手动补充的事实会标记为「人工核实（手动补充）」——不会伪装成 Amazon / SellerSprite / 标题等自动提取来源。
+            </p>
+          </div>
+        )}
+      </div>
+      </div>
+    </details>
+  );
+}

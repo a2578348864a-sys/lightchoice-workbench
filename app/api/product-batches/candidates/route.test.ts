@@ -1,0 +1,108 @@
+import { NextRequest } from "next/server";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+  requireAuthenticated: vi.fn(),
+  convert: vi.fn(),
+}));
+
+vi.mock("@/lib/server/demoGuard", () => ({
+  requireAuthenticated: mocks.requireAuthenticated,
+}));
+
+vi.mock("@/lib/server/productBatchCandidateService", () => ({
+  convertProductBatchItemToCandidate: mocks.convert,
+  ProductBatchCandidateConversionError: class ProductBatchCandidateConversionError extends Error {
+    constructor(public readonly code: string, message: string) {
+      super(message);
+      this.name = "ProductBatchCandidateConversionError";
+    }
+  },
+}));
+
+import { POST } from "./route";
+
+function request(body: unknown, headers: Record<string, string> = {}) {
+  return new NextRequest("http://localhost:3000/api/product-batches/candidates", {
+    method: "POST", body: JSON.stringify(body),
+    headers: { "content-type": "application/json", origin: "http://localhost:3000", host: "localhost:3000", ...headers },
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.requireAuthenticated.mockReturnValue({
+    ok: true,
+    context: { mode: "owner", token: "owner-token" },
+  });
+  mocks.convert.mockResolvedValue({
+    candidateId: "candidate-a",
+    created: true,
+    destination: "research",
+    destinationUrl: "/opportunity-candidates?view=startable&candidateId=candidate-a",
+    sourceMeta: {
+      version: "product-batch-agent-run-source.v1",
+      originKind: "seller_sprite_product_batch",
+      productBatchId: "batch-a",
+      productBatchItemId: "item-a",
+      productName: "Closet organizer",
+    },
+  });
+});
+
+describe("POST /api/product-batches/candidates", () => {
+  it("accepts only productBatchItemId and returns the server-built Candidate handoff", async () => {
+    const response = await POST(request({ productBatchItemId: "item-a" }) as never);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mocks.convert).toHaveBeenCalledWith(
+      { mode: "owner", token: "owner-token" },
+      "item-a",
+    );
+    expect(body.data).toMatchObject({
+      candidateId: "candidate-a",
+      created: true,
+      destination: "research",
+      destinationUrl: "/opportunity-candidates?view=startable&candidateId=candidate-a",
+      sourceMeta: {
+        originKind: "seller_sprite_product_batch",
+        productName: "Closet organizer",
+      },
+    });
+    // route 原样下发服务端单一出口地址（不在 route 二次拼接）
+    expect(body.data.destinationUrl).toBe("/opportunity-candidates?view=startable&candidateId=candidate-a");
+    expect(body.data.destinationUrl).not.toContain("Closet");
+  });
+
+  it.each([
+    {},
+    { productBatchItemId: "" },
+    { productBatchItemId: "item-a", productName: "client-forged title" },
+    { productBatchItemId: "item-a", evidenceHash: "f".repeat(64) },
+    { productBatchItemId: "item-a", ownerSubject: "forged-owner" },
+  ])("fails closed for missing or extra client-authoritative fields: %j", async (payload) => {
+    const response = await POST(request(payload) as never);
+
+    expect(response.status).toBe(400);
+    expect(mocks.convert).not.toHaveBeenCalled();
+  });
+
+  it("requires same-origin authenticated access", async () => {
+    const crossOrigin = await POST(request(
+      { productBatchItemId: "item-a" },
+      { origin: "https://evil.example" },
+    ) as never);
+    expect(crossOrigin.status).toBe(403);
+    expect(mocks.convert).not.toHaveBeenCalled();
+
+    mocks.requireAuthenticated.mockReturnValueOnce({
+      ok: false,
+      status: 401,
+      code: "invalid_access",
+      message: "unauthorized",
+    });
+    const unauthenticated = await POST(request({ productBatchItemId: "item-a" }) as never);
+    expect(unauthenticated.status).toBe(401);
+  });
+});

@@ -1,0 +1,55 @@
+.comparison { display: grid; gap: 18px; color: #33463f; font-size: 14px; line-height: 1.72; min-width: 0; }
+.comparison p { font-size: 13px; line-height: 1.7; margin: 5px 0; }
+.questionBox { border-left: 3px solid #087f68; padding: 6px 0 6px 16px; display: grid; gap: 9px; background: #fbfdfc; border-radius: 0 10px 10px 0; }
+.questionBox label { display: grid; gap: 6px; font-size: 12.5px; color: #5e7169; }
+.questionBox select, .questionBox input { width: 100%; max-width: 960px; min-height: 36px; border: 1px solid #dfeae4; border-radius: 9px; background: white; padding: 7px 10px; color: #16241f; font-size: 13px; }
+.questionBox .muted { font-size: 12px; color: #84968e; }
+.sectionHeading { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.sectionHeading h3 { margin: 0; font-size: 16px; font-weight: 660; color: #16241f; }
+.sectionHeading span { color: #84968e; font-size: 11.5px; }
+.factTableScroll { overflow-x: auto; min-width: 0; border: 1px solid #e3ece7; border-radius: 12px; }
+.comparison .factTable { width: 100%; table-layout: fixed; min-width: 900px; border-collapse: collapse; }
+.comparison .factTable th, .comparison .factTable td { padding: 12px 14px; font-size: 13px; line-height: 1.7; vertical-align: top; text-align: left; overflow-wrap: anywhere; word-break: normal; border-bottom: 1px solid #eef4f0; }
+.comparison .factTable thead th { background: #f7fbf9; color: #5e7169; font-weight: 650; }
+.comparison .factTable th:first-child { width: 190px; color: #16241f; font-weight: 600; }
+.productHeader { display: flex; align-items: center; gap: 12px; }
+.productHeader > div { min-width: 0; }
+.productHeader b { font-size: 12.5px; color: #16241f; }
+.productHeader span { display: block; color: #84968e; font-size: 11px; }
+.shortTitle { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.difference { display: block; width: fit-content; padding: 1px 8px; margin-top: 6px; font-size: 10.5px; border-radius: 999px; border: 1px solid #d3e4da; color: #5e7169; background: #f7fbf9; }
+.difference[data-state="different"] { color: #0b5c4a; background: #eef8f2; border-color: #bfe0cf; }
+.difference[data-state="conflict"] { color: #8e3b2a; background: #fbefeb; border-color: #edd6cd; }
+.difference[data-state="unknown"] { color: #8a5d14; background: #fbf3e3; border-color: #eadab8; }
+.comparison .explanation td { background: #fbfdfc; border-bottom: 1px solid #e3ece7; }
+.comparison .explanation p { font-size: 12px; color: #5e7169; }
+.parameters { border-top: 1px solid #e3ece7; padding: 12px 0; }
+.parameters > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: #0b5c4a; padding: 8px 0; }
+.parameters > p { margin: 12px 0; color: #5e7169; }
+.sourceGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 12px; }
+.sourceGrid article { min-width: 0; overflow-wrap: anywhere; border-left: 2px solid #e3ece7; padding-left: 14px; }
+.sourceGrid h4 { margin: 0 0 6px; font-size: 13px; color: #16241f; }
+.sourceGrid p { font-size: 12px; }
+.sourceGrid li { font-size: 12px; margin: 6px 0; }
+.sourceGrid a { color: #0b5c4a; text-decoration: underline; }
+.comparison :is(input, select, summary, a):focus-visible { outline: 2px solid #087f68; outline-offset: 3px; }
+
+/* The existing DataTable remains the only management table. Give every column a usable width. */
+.sampleManagement { min-width: 0; color: #1e293b; }
+.sampleManagement > summary { font-size: 16px; padding-bottom: 12px; }
+.sampleManagement :global(table) { table-layout: fixed; min-width: 1320px; width: 100%; }
+.sampleManagement[data-has-scope="true"] :global(table) { min-width: 1520px; }
+.sampleManagement :global(th) { font-size: 14px; white-space: nowrap; width: 140px; }
+.sampleManagement :global(th:first-child) { width: 48px; }
+.sampleManagement :global(th:nth-child(2)) { width: 340px; }
+.sampleManagement[data-has-scope="true"] :global(th:nth-child(3)) { width: 210px; }
+.sampleManagement :global(th:last-child) { width: 110px; }
+.sampleManagement :global(td) { font-size: 14px; line-height: 1.7; vertical-align: top; word-break: normal; overflow-wrap: anywhere; }
+.sampleManagement :global(td:nth-child(2) > div) { min-width: 0; }
+.sampleManagement :global(td summary) { font-size: 13px; cursor: pointer; }
+.sampleManagement :global(td p) { max-width: 65ch; }
+.sampleManagement :global([data-testid="product-identity-primary-title"]) { font-size: 14px; line-height: 1.6; }
+.sampleManagement :global(.lc-sample-toolbar-title p) { font-size: 14px; color: #475569; }
+.sampleManagement :global(button), .sampleManagement :global(input) { font-size: 14px; }
+.sampleManagement :global(select) { min-height: 34px; }
+.draftBoundary { font-size: 14px; color: #475569; line-height: 1.75; margin: 12px 0; padding: 10px 14px; border-left: 3px solid #1d4ed8; background: #eff6ff; }

@@ -1,0 +1,612 @@
+/**
+ * V3.1 Spike — Amazon 商品详情页（/dp/ASIN）确定性提取器
+ *
+ * 铁律：页面上看得到 ≠ 可保存为结构化 Evidence。
+ * 只有能证明 field → current entity（URL ASIN 与页面 ASIN 锚点双一致）
+ * 才允许认定有效；证明不了 → null/unknown + reason，不猜、不跨商品补值。
+ *
+ * 只提取 6 个白名单字段：ASIN / title / price / BSR / rating / review count。
+ * 不使用 LLM 猜字段；页面结构变化 → fail-closed。
+ */
+
+export type AmazonDetailPageStatus = "ok" | "captcha" | "automation_blocked" | "login_wall" | "error_page" | "unknown_page";
+
+export type AmazonDetailFieldStatus = "correct" | "unknown";
+
+export type AmazonDetailFieldValue = {
+  field: "asin" | "title" | "price" | "bsr" | "rating" | "reviews";
+  value: string | number | null;
+  status: AmazonDetailFieldStatus;
+  reason: string | null;
+};
+
+export type AmazonDetailPageExtraction = {
+  schemaVersion: "amazon-detail-page-extraction.v1";
+  expectedAsin: string | null;
+  urlAsin: string | null;
+  pageAsin: string | null;
+  entityBound: boolean;
+  bindingProof: {
+    urlMatchesExpected: boolean;
+    pageAnchorMatchesExpected: boolean;
+    productContainerFound: boolean;
+  };
+  pageStatus: AmazonDetailPageStatus;
+  fields: Record<AmazonDetailFieldValue["field"], AmazonDetailFieldValue>;
+  capturedAt: string;
+  collectorVersion: string;
+};
+
+export type AmazonDetailPageExtractionOptions = {
+  expectedAsin: string | null;
+  capturedAt: string;
+  collectorVersion: string;
+};
+
+const ASIN_PATTERN = /^[A-Z0-9]{10}$/;
+
+export function normalizeAsin(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase();
+  return /^[A-Z0-9]{10}$/.test(normalized) ? normalized : null;
+}
+
+/** 从商品详情 URL 提取 ASIN（/dp/{ASIN}、/gp/aw/d/{ASIN}、/gp/product/{ASIN}、/product/{ASIN}）；仅允许 amazon.com 主机 */
+export function parseAsinFromDetailUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return null;
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname !== "www.amazon.com" && hostname !== "amazon.com") return null;
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      if (segments[index] === "dp" || segments[index] === "product") {
+        const candidate = normalizeAsin(segments[index + 1]);
+        if (candidate) return candidate;
+      }
+      if (segments[index] === "aw" && segments[index + 1] === "d" && segments[index + 2]) {
+        const candidate = normalizeAsin(segments[index + 2]);
+        if (candidate) return candidate;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function sanitizeDetailText(value: string | null | undefined, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .replace(/[\u0000-\u001F\u007F\u200B-\u200F\uFEFF\u202A-\u202E]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+/** "$48.95" / "$48.95 USD" / "US$1,234.56" → 48.95/1234.56；仅接受 USD 币种（JPY/其他 → null，防止跨币种错存） */
+export function parseDetailPrice(value: string | null | undefined): number | null {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!/^\s*(?:US\$|\$)/i.test(text)) return null;
+  const match = /^\s*(?:US\$|\$)\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)\s*(?:USD)?\s*$/i.exec(text);
+  if (!match) return null;
+  const parsed = Number(match[1].replace(/,/g, ""));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+/** 检测页面价格币种（诊断用；非 USD 时 price 不保存） */
+export function detectDetailPriceCurrency(value: string | null | undefined): "USD" | "JPY" | "other" | null {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (/^\s*(?:US\$|\$)/i.test(text)) return "USD";
+  if (/^\s*(?:JPY|￥|¥)/i.test(text)) return "JPY";
+  if (/^\s*(?:[A-Z]{3}|€|£)/i.test(text)) return "other";
+  return text ? null : null;
+}
+
+/** "4.2 out of 5 stars" / "4.2" → 4.2；范围校验 [0,5] */
+export function parseDetailRating(value: string | null | undefined): number | null {
+  const text = typeof value === "string" ? value.trim() : "";
+  const match = /^\s*([0-9]+(?:\.[0-9]+)?)/.exec(text);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 5 ? parsed : null;
+}
+
+/** "4,958 ratings" / "(4,958)" / "4,958 条评分" → 4958 */
+export function parseDetailReviewCount(value: string | null | undefined): number | null {
+  const text = typeof value === "string" ? value.trim() : "";
+  const match = /^\s*\(?\s*([0-9][0-9,]*)/.exec(text);
+  if (!match) return null;
+  const parsed = Number(match[1].replace(/,/g, ""));
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+/** "Best Sellers Rank: #2,541 in Kitchen & Dining" / "#2,541 in …" → 2541（取首个排名数字） */
+export function parseDetailBsr(value: string | null | undefined): number | null {
+  const text = typeof value === "string" ? value.trim() : "";
+  const match = /#\s*([0-9][0-9,]*)/.exec(text);
+  if (!match) return null;
+  const parsed = Number(match[1].replace(/,/g, ""));
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+}
+
+/**
+ * 详情页分类（fail-closed）：
+ * - captcha：出现可交互验证码/机器人校验文案
+ * - automation_blocked：Amazon 自动化访问校验中间页（如 `/errors_page/validateCaptcha` +
+ *   "Click the button below to continue shopping"）。它是**同源访问校验网关**，
+ *   没有登录表单/登录链接，因此**不能**归类为 login_wall（避免 UI 指引用户去登录）。
+ * - login_wall：真实登录墙文案
+ * - error_page：服务错误页
+ * - ok：商品主容器 `#productTitle` 存在
+ * - 其余 unknown_page
+ */
+export function detectDetailPageStatus(root: {
+  body?: { innerText?: string | null } | null;
+  querySelector: (selector: string) => unknown;
+}): AmazonDetailPageStatus {
+  const bodyText = sanitizeDetailText(root.body?.innerText, 4000) ?? "";
+  if (/captcha|robot check|enter the characters you see|type the characters you see|验证码|机器人/i.test(bodyText)) {
+    return "captcha";
+  }
+  // 商品主容器存在 → 正常商品页；只有缺失时才判定为阻断页，避免正常页面里的偶然措辞被误分类。
+  const productContainer = root.querySelector("#productTitle");
+  // Amazon "Continue shopping" 自动化校验中间页：页面通常只含一个
+  // `GET /errors_page/validateCaptcha` 表单（无登录表单、无验证码输入控件）。
+  if (
+    !productContainer
+    && (
+      root.querySelector("form[action*='validateCaptcha']")
+      || /click the button below to continue shopping|continue shopping/i.test(bodyText)
+    )
+  ) {
+    return "automation_blocked";
+  }
+  if (
+    !productContainer
+    && /sign in to continue|login to continue|please sign in|登录后继续/i.test(bodyText)
+  ) {
+    return "login_wall";
+  }
+  if (/sorry[, ]+something went wrong|service unavailable|internal server error|页面出错/i.test(bodyText)) {
+    return "error_page";
+  }
+  return productContainer ? "ok" : "unknown_page";
+}
+
+/** 从详情子弹表或技术参数表提取 ASIN 锚点（"ASIN" 行值）；找不到 → null */
+export function readDetailPageAsinAnchor(root: {
+  querySelector: (selector: string) => unknown;
+  querySelectorAll: (selector: string) => ReadonlyArray<unknown>;
+}): string | null {
+  const containers = [
+    "#detailBullets_feature_div",
+    "#productDetails_detailBullets_sections1",
+    "#prodDetails",
+    "#productDetails_techSpec_section_1",
+    "#productDetails_techSpec_section_2",
+    "#productDetails_db_sections",
+    "#productDetails_feature_div",
+    "#technicalSpecifications_section_1",
+    "#detailBulletsWrapper_feature_div",
+  ];
+  for (const containerSelector of containers) {
+    const container = root.querySelector(containerSelector);
+    if (!container) continue;
+    const rows = (container as { querySelectorAll?: (s: string) => ReadonlyArray<unknown> })
+      .querySelectorAll?.("tr, li") ?? [];
+    for (const row of rows) {
+      const rowNode = row as {
+        textContent?: string | null;
+        querySelector?: (selector: string) => { textContent?: string | null } | null;
+      };
+      // 1. 若为表格行且具有 th 和 td，直接结构化比对
+      if (typeof rowNode.querySelector === "function") {
+        const thText = sanitizeDetailText(rowNode.querySelector("th")?.textContent, 100);
+        const tdText = sanitizeDetailText(rowNode.querySelector("td")?.textContent, 100);
+        if (thText && /ASIN/i.test(thText) && tdText) {
+          const match = /(?:^|\s)([A-Z0-9]{10})(?:\s|$)/.exec(tdText);
+          if (match) return match[1].toUpperCase();
+        }
+      }
+      // 2. 通用文本匹配（支持子弹列表及无冒号表格拼接格式）
+      const text = sanitizeDetailText(rowNode.textContent, 240) ?? "";
+      const asinMatch = /(?:^|\s)ASIN\s*[:：]?\s*([A-Z0-9]{10})(?:\s|$)/i.exec(text);
+      if (asinMatch) return asinMatch[1].toUpperCase();
+      const valueOnly = /(?:^|\s)([A-Z0-9]{10})(?:\s|$)/.exec(text);
+      const label = /ASIN/i.test(text);
+      if (label && valueOnly) return valueOnly[1].toUpperCase();
+    }
+  }
+
+  // Current Amazon pages may keep the product identity in the hidden buybox
+  // form instead of rendering an ASIN row in the detail/spec tables.  This is
+  // still a deterministic, entity-scoped anchor: only accept the hidden ASIN
+  // input when it is inside Amazon's product container, and never fall back to
+  // arbitrary page text or URL-only identity.
+  const productScopedInputSelectors = [
+    "#dp input#ASIN",
+    "#dp-container input#ASIN",
+    "#dp input[name='ASIN']",
+    "#dp-container input[name='ASIN']",
+  ];
+  for (const selector of productScopedInputSelectors) {
+    const input = root.querySelector(selector) as {
+      value?: string | null;
+      getAttribute?: (name: string) => string | null;
+    } | null;
+    if (!input) continue;
+    const rawValue = typeof input.value === "string"
+      ? input.value
+      : input.getAttribute?.("value") ?? null;
+    const normalized = normalizeAsin(rawValue);
+    if (normalized) return normalized;
+  }
+
+  return null;
+}
+
+/** 从详情子弹表或技术参数表提取 "Best Sellers Rank" 文本（可能含多类目排名，返回拼接后首个 # 数字） */
+export function readDetailPageBsrText(root: {
+  querySelector: (selector: string) => unknown;
+  querySelectorAll: (selector: string) => ReadonlyArray<unknown>;
+}): string | null {
+  const containers = [
+    "#detailBullets_feature_div",
+    "#productDetails_detailBullets_sections1",
+    "#prodDetails",
+    "#productDetails_techSpec_section_1",
+    "#productDetails_techSpec_section_2",
+    "#productDetails_db_sections",
+    "#productDetails_feature_div",
+    "#technicalSpecifications_section_1",
+    "#detailBulletsWrapper_feature_div",
+  ];
+  for (const containerSelector of containers) {
+    const container = root.querySelector(containerSelector);
+    if (!container) continue;
+    const rows = (container as { querySelectorAll?: (s: string) => ReadonlyArray<unknown> })
+      .querySelectorAll?.("tr, li") ?? [];
+    for (const row of rows) {
+      const text = sanitizeDetailText((row as { textContent?: string | null }).textContent, 400) ?? "";
+      if (/best sellers rank/i.test(text)) {
+        return text;
+      }
+    }
+  }
+  return null;
+}
+
+function unknownField(field: AmazonDetailFieldValue["field"], reason: string): AmazonDetailFieldValue {
+  return { field, value: null, status: "unknown", reason };
+}
+
+function correctField(field: AmazonDetailFieldValue["field"], value: string | number): AmazonDetailFieldValue {
+  return { field, value, status: "correct", reason: null };
+}
+
+export type AmazonDetailDomRoot = {
+  body?: { innerText?: string | null } | null;
+  querySelector: (selector: string) => {
+    textContent?: string | null;
+    value?: string | null;
+    getAttribute?: (name: string) => string | null;
+    querySelector?: (selector: string) => { textContent?: string | null } | null;
+  } | null;
+  querySelectorAll: (selector: string) => ReadonlyArray<unknown>;
+};
+
+/**
+ * 详情页 6 字段提取（确定性锚点；实体绑定失败 → 全字段 unknown）。
+ * 价格/评分/评论数/BSR 仅从主容器已知锚点读取，推荐/广告卡片不进入。
+ */
+export function extractAmazonDetailPage(
+  root: AmazonDetailDomRoot,
+  pageUrl: string,
+  options: AmazonDetailPageExtractionOptions,
+): AmazonDetailPageExtraction {
+  const pageStatus = detectDetailPageStatus(root);
+  const urlAsin = parseAsinFromDetailUrl(pageUrl);
+  const pageAsin = readDetailPageAsinAnchor(root);
+  const expectedAsin = normalizeAsin(options.expectedAsin);
+  const productContainerFound = root.querySelector("#productTitle") !== null;
+  const urlMatchesExpected = expectedAsin !== null && urlAsin === expectedAsin;
+  const pageAnchorMatchesExpected = expectedAsin !== null && pageAsin === expectedAsin;
+  const entityBound = pageStatus === "ok"
+    && productContainerFound
+    && urlMatchesExpected
+    && pageAnchorMatchesExpected;
+
+  const bindingReason = !entityBound
+    ? (pageStatus !== "ok"
+      ? `page_status_${pageStatus}`
+      : !urlMatchesExpected
+        ? "url_asin_mismatch"
+        : !pageAnchorMatchesExpected
+          ? "page_asin_anchor_mismatch"
+          : "product_container_not_found")
+    : null;
+
+  const fields: AmazonDetailPageExtraction["fields"] = {
+    asin: unknownField("asin", "entity_binding_unproven"),
+    title: unknownField("title", "entity_binding_unproven"),
+    price: unknownField("price", "entity_binding_unproven"),
+    bsr: unknownField("bsr", "entity_binding_unproven"),
+    rating: unknownField("rating", "entity_binding_unproven"),
+    reviews: unknownField("reviews", "entity_binding_unproven"),
+  };
+
+  if (entityBound && expectedAsin !== null) {
+    const titleNode = root.querySelector("#productTitle");
+    const title = sanitizeDetailText(titleNode?.textContent, 500);
+    fields.asin = correctField("asin", expectedAsin);
+    fields.title = title
+      ? correctField("title", title)
+      : unknownField("title", "selector_not_found");
+
+    // V3R（Research→Creative Consistency）：补新 buybox 价格容器（#corePriceDisplay_*_feature_div
+    // 内的 .a-price .a-offscreen）——2024+ 详情页新版价格块；旧选择器保留兜底。
+    const priceText = sanitizeDetailText(readFirstText(root, [
+      "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
+      "#corePriceDisplay_mobile_feature_div .a-price .a-offscreen",
+      "#corePrice_feature_div .a-offscreen",
+      "#corePrice_feature_div .a-price .a-offscreen",
+      ".priceToPay .a-offscreen",
+      "#priceblock_ourprice",
+      "#priceblock_dealprice",
+    ]), 60);
+    const price = parseDetailPrice(priceText);
+    const priceCurrency = detectDetailPriceCurrency(priceText);
+    fields.price = price !== null
+      ? correctField("price", price)
+      : unknownField("price", priceText
+        ? (priceCurrency === "JPY" || priceCurrency === "other"
+          ? `currency_not_usd:${priceCurrency}`
+          : "format_invalid")
+        : "selector_not_found");
+
+    const bsrText = readDetailPageBsrText(root);
+    const bsr = parseDetailBsr(bsrText);
+    fields.bsr = bsr !== null
+      ? correctField("bsr", bsr)
+      : unknownField("bsr", bsrText ? "format_invalid" : "selector_not_found");
+
+    const ratingText = sanitizeDetailText(root.querySelector("#acrPopover .a-icon-alt")?.textContent, 60);
+    const rating = parseDetailRating(ratingText);
+    fields.rating = rating !== null
+      ? correctField("rating", rating)
+      : unknownField("rating", ratingText ? "format_invalid" : "selector_not_found");
+
+    const reviewsText = sanitizeDetailText(root.querySelector("#acrCustomerReviewText")?.textContent, 60);
+    const reviews = parseDetailReviewCount(reviewsText);
+    fields.reviews = reviews !== null
+      ? correctField("reviews", reviews)
+      : unknownField("reviews", reviewsText ? "format_invalid" : "selector_not_found");
+  } else {
+    for (const field of Object.keys(fields) as Array<AmazonDetailFieldValue["field"]>) {
+      fields[field] = { field, value: null, status: "unknown", reason: bindingReason ?? "entity_binding_unproven" };
+    }
+  }
+
+  return {
+    schemaVersion: "amazon-detail-page-extraction.v1",
+    expectedAsin,
+    urlAsin,
+    pageAsin,
+    entityBound,
+    bindingProof: {
+      urlMatchesExpected,
+      pageAnchorMatchesExpected,
+      productContainerFound,
+    },
+    pageStatus,
+    fields,
+    capturedAt: options.capturedAt,
+    collectorVersion: options.collectorVersion,
+  };
+}
+
+/**
+ * V3 Final PHASE 1 — Amazon Product Information 提取（Bounded DOM，复用实体绑定前提）
+ *
+ * 数据链：Existing Collector（6 字段）→ 若仍有 MISSING_RELEVANT → Product Information 提取
+ * （material/dimensions/weight/care/included_components/operation 等规格行）→ Fact Candidate
+ * → Human Confirmation。绝不直接写 Confirmed Fact。
+ *
+ * 提取范围（Bounded/Targeted/Read-only，Spike 实证）：
+ * - 主规格表容器：#productDetails_expanderTables_depthLeftSections /
+ *   #productDetails_expanderTables_depthRightSections 内的 table.a-keyvalue.prodDetTable 行
+ * - 概览区：#productOverview_feature_div 内的 table 行
+ * - 不触碰 buybox / sponsored / related / recommended 区（Related Product Gate 天然成立）
+ * 实体绑定未证明（entityBound=false）→ 全字段 unknown（fail-closed）。
+ */
+
+export type AmazonProductInfoRow = {
+  label: string;
+  value: string;
+  sourceSection: "productDetails_depthLeftSections" | "productDetails_depthRightSections" | "productOverview_feature_div";
+};
+
+export type AmazonProductInfoExtraction = {
+  schemaVersion: "amazon-product-info-extraction.v1";
+  entityBound: boolean;
+  bindingReason: string | null;
+  rows: AmazonProductInfoRow[];
+  /** canonical 字段 → 页面原样值（经 PRODUCT_INFO_LABEL_MAP 映射；未映射的 label 只留在 rows） */
+  canonicalFacts: Record<string, string>;
+  capturedAt: string;
+  collectorVersion: string;
+};
+
+/** canonical 字段 → 页面 label 候选（首个命中优先；与 CDP 表达式工件、factCandidates 提取保持同一映射） */
+export const PRODUCT_INFO_LABEL_MAP: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["brand", ["Brand Name", "Brand"]],
+  ["product_type", ["Item Type Name", "Bottle Type"]],
+  ["series_or_model", ["Model Name", "Model Number"]],
+  ["material", ["Material Type", "Material"]],
+  ["capacity", ["Total Capacity", "Capacity", "Item Capacity", "Volume", "Metric Capacity"]],
+  ["item_dimensions", ["Item Dimensions L x W x H", "Item Dimensions L x W x Thickness", "Item Dimensions W x H", "Item Dimensions", "Product Dimensions"]],
+  ["package_dimensions", ["Package Dimensions", "Shipping Dimensions"]],
+  ["item_weight", ["Item Weight"]],
+  ["package_weight", ["Package Weight", "Shipping Weight"]],
+  ["color_or_variant", ["Color", "Theme"]],
+  ["quantity_or_pack_size", ["Unit Count", "Number of Items", "Package Quantity"]],
+  ["functional_feature", ["Other Special Features of the Product", "Additional Features", "Special Feature", "Material Features", "Material Feature", "Features"]],
+  ["care", ["Product Care Instructions", "Care Instructions"]],
+  ["included_components", ["Included Components"]],
+  ["launched_date", ["Date First Available", "Date First Listed"]],
+  ["operation", ["Lid Type", "Cap Type", "Closure Type", "Operation Mode", "Installation Type", "Assembly Required"]],
+  ["use_scenario", ["Recommended Uses For Product", "Recommended Uses", "Uses"]],
+  ["compatibility", ["Compatible Devices", "Compatible With", "Compatibility"]],
+  ["construction", ["Construction Type", "Finish Type"]],
+];
+
+const PRODUCT_INFO_CONTAINER_SELECTORS = [
+  "#productDetails_expanderTables_depthLeftSections",
+  "#productDetails_expanderTables_depthRightSections",
+];
+
+const PRODUCT_INFO_ROW_LIMIT = 60;
+const PRODUCT_INFO_TEXT_LIMIT = 200;
+
+/** 只读主规格表行（限定容器；不触碰 buybox/sponsored/related 区） */
+export function readProductInfoRows(root: {
+  querySelectorAll: (selector: string) => ReadonlyArray<unknown>;
+}): AmazonProductInfoRow[] {
+  const rows: AmazonProductInfoRow[] = [];
+  const seen = new Set<string>();
+  const containers = PRODUCT_INFO_CONTAINER_SELECTORS.map((selector) => root.querySelectorAll(selector));
+  const sections: Array<AmazonProductInfoRow["sourceSection"]> = ["productDetails_depthLeftSections", "productDetails_depthRightSections"];
+  for (let ci = 0; ci < containers.length; ci += 1) {
+    const container = containers[ci];
+    for (const node of container) {
+      const table = (node as { querySelectorAll?: (s: string) => ReadonlyArray<unknown> });
+      const tableRows = table.querySelectorAll?.("table.a-keyvalue.prodDetTable tr") ?? [];
+      for (const rowNode of tableRows) {
+        const cells = (rowNode as { querySelectorAll?: (s: string) => ReadonlyArray<unknown> })
+          .querySelectorAll?.("td, th") ?? [];
+        if (cells.length < 2) continue;
+        const label = sanitizeDetailText((cells[0] as { textContent?: string | null }).textContent, PRODUCT_INFO_TEXT_LIMIT);
+        const value = sanitizeDetailText((cells[1] as { textContent?: string | null }).textContent, PRODUCT_INFO_TEXT_LIMIT);
+        if (!label || !value) continue;
+        if (/^(?:fba fees?|estimated monthly (?:sales|revenue))$/i.test(label)) continue;
+        const key = `${sections[ci]}:${label}`;
+        if (seen.has(key) || rows.length >= PRODUCT_INFO_ROW_LIMIT) continue;
+        seen.add(key);
+        rows.push({ label, value, sourceSection: sections[ci] });
+      }
+    }
+  }
+  // 概览区（productOverview_feature_div）作为补充源
+  for (const node of root.querySelectorAll("#productOverview_feature_div")) {
+    const tableRows = (node as { querySelectorAll?: (s: string) => ReadonlyArray<unknown> })
+      .querySelectorAll?.("table tr") ?? [];
+    for (const rowNode of tableRows) {
+      const cells = (rowNode as { querySelectorAll?: (s: string) => ReadonlyArray<unknown> })
+        .querySelectorAll?.("td, th") ?? [];
+      if (cells.length < 2) continue;
+      const label = sanitizeDetailText((cells[0] as { textContent?: string | null }).textContent, PRODUCT_INFO_TEXT_LIMIT);
+      const value = sanitizeDetailText((cells[1] as { textContent?: string | null }).textContent, PRODUCT_INFO_TEXT_LIMIT);
+      if (!label || !value) continue;
+      if (/^(?:fba fees?|estimated monthly (?:sales|revenue))$/i.test(label)) continue;
+      const key = `productOverview_feature_div:${label}`;
+      if (seen.has(key) || rows.length >= PRODUCT_INFO_ROW_LIMIT) continue;
+      seen.add(key);
+      rows.push({ label, value, sourceSection: "productOverview_feature_div" });
+    }
+  }
+  return rows;
+}
+
+/** canonical 映射：rows → { field: 页面原样值 }（首个匹配 label 优先；未映射 label 忽略） */
+export function mapProductInfoToCanonical(rows: ReadonlyArray<Pick<AmazonProductInfoRow, "label" | "value">>): Record<string, string> {
+  const recovered: Record<string, string> = {};
+  const used = new Set<string>();
+  for (const [field, labels] of PRODUCT_INFO_LABEL_MAP) {
+    for (const label of labels) {
+      const row = rows.find((r) => r.label === label);
+      if (row && !used.has(label)) {
+        recovered[field] = row.value;
+        used.add(label);
+        break;
+      }
+    }
+  }
+  return recovered;
+}
+
+/** Product Information 提取（entityBound 前提；未绑定 → 全空 fail-closed） */
+export function extractAmazonProductInfo(
+  root: AmazonDetailDomRoot,
+  pageUrl: string,
+  options: AmazonDetailPageExtractionOptions,
+): AmazonProductInfoExtraction {
+  const pageStatus = detectDetailPageStatus(root);
+  const urlAsin = parseAsinFromDetailUrl(pageUrl);
+  const pageAsin = readDetailPageAsinAnchor(root);
+  const expectedAsin = normalizeAsin(options.expectedAsin);
+  const productContainerFound = root.querySelector("#productTitle") !== null;
+  const urlMatchesExpected = expectedAsin !== null && urlAsin === expectedAsin;
+  const pageAnchorMatchesExpected = expectedAsin !== null && pageAsin === expectedAsin;
+  const entityBound = pageStatus === "ok"
+    && productContainerFound
+    && urlMatchesExpected
+    && pageAnchorMatchesExpected;
+  const bindingReason = !entityBound
+    ? (pageStatus !== "ok"
+      ? `page_status_${pageStatus}`
+      : !urlMatchesExpected
+        ? "url_asin_mismatch"
+        : !pageAnchorMatchesExpected
+          ? "page_asin_anchor_mismatch"
+          : "product_container_not_found")
+    : null;
+
+  if (!entityBound) {
+    return {
+      schemaVersion: "amazon-product-info-extraction.v1",
+      entityBound,
+      bindingReason,
+      rows: [],
+      canonicalFacts: {},
+      capturedAt: options.capturedAt,
+      collectorVersion: options.collectorVersion,
+    };
+  }
+  const rows = readProductInfoRows(root);
+  return {
+    schemaVersion: "amazon-product-info-extraction.v1",
+    entityBound,
+    bindingReason,
+    rows,
+    canonicalFacts: mapProductInfoToCanonical(rows),
+    capturedAt: options.capturedAt,
+    collectorVersion: options.collectorVersion,
+  };
+}
+
+function readFirstText(
+  root: AmazonDetailDomRoot,
+  selectors: readonly string[],
+): string | null {
+  for (const selector of selectors) {
+    const node = root.querySelector(selector);
+    if (typeof node?.textContent === "string" && node.textContent.trim()) return node.textContent;
+  }
+  return null;
+}
+
+/**
+ * CDP Runtime.evaluate 表达式（浏览器内执行；只读 DOM，不触碰存储/凭据）。
+ * P1-A：改为 self-contained 字符串工件（detail-page-expression-source.ts）——
+ * 不再用 fn.toString() 序列化模块函数（生产 minify 会重命名标识符导致
+ * ReferenceError: s is not defined）；API 与返回格式完全兼容。
+ */
+export { buildAmazonDetailPageExtractionExpression } from "@/tools/collectors/amazon/detail-page-expression-source";
+export type { AmazonDetailPageExpressionOptions } from "@/tools/collectors/amazon/detail-page-expression-source";
+export { buildAmazonProductInfoExtractionExpression } from "@/tools/collectors/amazon/detail-page-expression-source";
+export type { AmazonProductInfoExpressionOptions } from "@/tools/collectors/amazon/detail-page-expression-source";
+
+export { extractAmazonSellerContent } from '@/lib/server/amazonFactEnrichment/sellerContent';
+export type { AmazonSellerContentBlockV1 } from '@/lib/server/amazonFactEnrichment/contract';
+

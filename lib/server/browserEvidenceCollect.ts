@@ -1,0 +1,436 @@
+/**
+ * V3.3 — Browser Evidence 单页采集（服务端同步；不保存，只生成 Preview）
+ *
+ * 流程：隔离浏览器会话 → 导航任务绑定 ASIN 单页（?language=en_US）→
+ * 页面分类 + 实体绑定 + 6 字段提取 → 关闭会话 → 返回 Preview（不可信客户端不可伪造）。
+ *
+ * 安全铁律：
+ * - 只导航明确的 Amazon 零售站点白名单；单页导航，不自动搜索、不批量。
+ * - CAPTCHA / 登录墙 / 错误页 → fail-closed 明确错误，不绕过。
+ * - 不读取 Cookie/Token/密码；不保存完整 HTML；零 AI 调用。
+ */
+import { randomUUID } from "node:crypto";
+import {
+  resolveSystemBrowser,
+  openIsolatedPublicBrowserSession,
+  type AmazonEnvironmentCalibration,
+} from "@/tools/collectors/amazon/browser-control";
+import {
+  buildAmazonDetailPageExtractionExpression,
+  buildAmazonProductInfoExtractionExpression,
+  type AmazonDetailPageExtraction,
+  type AmazonProductInfoExtraction,
+} from "@/tools/collectors/amazon/detail-page-extract";
+import { AMAZON_RETAIL_ORIGINS } from "@/tools/collectors/amazon/page-diagnostics";
+import { BrowserEvidenceError, type BrowserEvidenceSnapshot } from "@/lib/server/browserEvidence";
+import type { AccessContext } from "@/lib/server/accessPassword";
+import { buildAmazonSellerContentExtractionExpression } from "@/tools/collectors/amazon/seller-content-expression-source";
+import { normalizeSellerBlocks } from "@/lib/server/amazonFactEnrichment/mapping";
+import type { AmazonSellerContentBlockV1 } from "@/lib/server/amazonFactEnrichment/contract";
+import { logInfo, logError } from "@/lib/server/agentEventLogger";
+
+export const BROWSER_EVIDENCE_ALLOWED_ORIGINS = AMAZON_RETAIL_ORIGINS;
+export const BROWSER_EVIDENCE_COLLECTOR_VERSION = "amazon-detail-page-extractor.v1";
+
+export type BrowserEvidenceNavigation = {
+  requestedUrl: string;
+  finalUrl: string;
+  httpStatus: number | null;
+  navigationElapsedMs: number;
+  allowedFinalOrigin: boolean;
+};
+
+export type BrowserEvidenceCollectPreview = {
+  extraction: AmazonDetailPageExtraction;
+  navigation: BrowserEvidenceNavigation;
+  /** 采集前环境校准结果（币种/配送地；未请求校准时为 null） */
+  calibration: AmazonEnvironmentCalibration | null;
+  /** V3 Final PHASE 1：Product Information 提取（规格行 + canonical 映射；实体绑定前提；失败时 null） */
+  productInfo?: AmazonProductInfoExtraction | null;
+  sellerContent?: AmazonSellerContentBlockV1[];
+};
+
+export type BrowserEvidenceStoredPreview = {
+  evidenceId: string;
+  preview: BrowserEvidenceCollectPreview;
+  capturedAt: string;
+  expiresAt: number;
+  /** 绑定主体：owner:v1 或 visitor:{demoAccessId}——Visitor A 不能取 B 的 Preview */
+  subjectKey: string;
+  /** 绑定任务：Preview 只能保存回采集它的任务 */
+  taskId: string;
+  /** 绑定 ASIN：与 preview 提取 ASIN 一致（三一致硬门禁的一部分） */
+  asin: string;
+};
+
+const PREVIEW_TTL_MS = 15 * 60 * 1000;
+const PREVIEW_MAX_ENTRIES = 64;
+
+/** 主体键：同一主体（Owner 或同一 Visitor）的 Preview 才能互取 */
+export function browserEvidenceSubjectKey(context: AccessContext): string {
+  return context.mode === "demo" ? `visitor:${context.demoAccessId}` : "owner:v1";
+}
+
+/** 服务端短暂缓存 collect 生成的 Preview；save 凭 evidenceId + 主体 + 任务取回，客户端无法篡改字段值 */
+class PreviewStore {
+  private entries = new Map<string, BrowserEvidenceStoredPreview>();
+
+  put(input: BrowserEvidenceStoredPreview): void {
+    this.prune();
+    if (this.entries.size >= PREVIEW_MAX_ENTRIES) {
+      const oldest = this.entries.keys().next().value;
+      if (typeof oldest === "string") this.entries.delete(oldest);
+    }
+    this.entries.set(input.evidenceId, input);
+  }
+
+  peek(evidenceId: string, claim: { subjectKey: string; taskId: string }): BrowserEvidenceStoredPreview | null {
+    this.prune();
+    const entry = this.entries.get(evidenceId);
+    if (!entry) return null;
+    // 跨主体 / 跨任务一律视为不可用（fail-closed，不泄漏 Preview 存在性之外的信息）
+    if (entry.subjectKey !== claim.subjectKey || entry.taskId !== claim.taskId) return null;
+    return entry;
+  }
+
+  consume(evidenceId: string, claim: { subjectKey: string; taskId: string }): boolean {
+    const entry = this.peek(evidenceId, claim);
+    if (!entry) return false;
+    this.entries.delete(evidenceId);
+    return true;
+  }
+
+  findPending(query: { subjectKey: string; taskId: string; asin: string }): BrowserEvidenceStoredPreview | null {
+    this.prune();
+    const normalizedAsin = query.asin.trim().toUpperCase();
+    const now = Date.now();
+    let match: BrowserEvidenceStoredPreview | null = null;
+    for (const entry of this.entries.values()) {
+      if (
+        entry.subjectKey === query.subjectKey &&
+        entry.taskId === query.taskId &&
+        entry.asin.trim().toUpperCase() === normalizedAsin &&
+        entry.expiresAt > now
+      ) {
+        match = entry;
+      }
+    }
+    return match;
+  }
+
+  clearForTests(): void {
+    this.entries.clear();
+  }
+
+  private prune(): void {
+    const now = Date.now();
+    for (const [id, entry] of this.entries) {
+      if (entry.expiresAt <= now) this.entries.delete(id);
+    }
+  }
+}
+
+const previewStore = new PreviewStore();
+
+export function storeBrowserEvidencePreview(input: BrowserEvidenceStoredPreview): void {
+  previewStore.put(input);
+}
+
+export function takeBrowserEvidencePreview(
+  evidenceId: string,
+  claim: { subjectKey: string; taskId: string },
+): BrowserEvidenceStoredPreview | null {
+  const entry = previewStore.peek(evidenceId, claim);
+  if (!entry) return null;
+  previewStore.consume(evidenceId, claim);
+  return entry;
+}
+
+/** 只读读取 Preview；校验或持久化失败时不得消耗，供保存流程在成功后 consume。 */
+export function peekBrowserEvidencePreview(
+  evidenceId: string,
+  claim: { subjectKey: string; taskId: string },
+): BrowserEvidenceStoredPreview | null {
+  return previewStore.peek(evidenceId, claim);
+}
+
+/** 仅在正式证据写入成功后作废 Preview；跨主体/跨任务调用不会删除。 */
+export function consumeBrowserEvidencePreview(
+  evidenceId: string,
+  claim: { subjectKey: string; taskId: string },
+): boolean {
+  return previewStore.consume(evidenceId, claim);
+}
+
+export function findPendingBrowserEvidencePreview(query: {
+  subjectKey: string;
+  taskId: string;
+  asin: string;
+}): BrowserEvidenceStoredPreview | null {
+  return previewStore.findPending(query);
+}
+
+export function resetBrowserEvidencePreviewStoreForTests(): void {
+  previewStore.clearForTests();
+}
+
+export class BrowserEvidenceCollectError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BrowserEvidenceCollectError";
+  }
+}
+
+/** 页面分类 → fail-closed 错误码（ok 返回 null）；导出供测试与诊断 */
+export function browserEvidenceFailClosedCode(
+  pageStatus: AmazonDetailPageExtraction["pageStatus"],
+): string | null {
+  switch (pageStatus) {
+    case "ok": return null;
+    case "captcha": return "page_blocked_captcha";
+    // Amazon 自动化访问校验中间页（/errors_page/validateCaptcha + "Continue shopping"）：
+    // 独立错误码，避免被当成登录墙而给出"请登录"的错误指引。
+    case "automation_blocked": return "automation_blocked";
+    case "login_wall": return "page_blocked_login_wall";
+    case "error_page": return "page_error";
+    case "unknown_page": return "page_unknown";
+  }
+}
+
+function failClosedMessage(code: string): string {
+  switch (code) {
+    case "page_blocked_captcha": return "页面要求验证码（CAPTCHA）。我们不自动绕过验证码：请在本机浏览器手动打开该商品页并确认是否为正常商品页后重试。";
+    case "automation_blocked": return "Amazon 触发了自动化访问校验（“Continue shopping”中间页）。系统不会绕过该校验：请在本机浏览器手动打开该商品页确认，或稍后重试。";
+    case "page_blocked_login_wall": return "页面要求登录。我们不自动登录：请确认该商品页可公开访问后重试。";
+    case "page_error": return "页面返回错误页（商品可能不存在、下架或访问受限）。请确认 ASIN 后重试。";
+    case "page_unknown": return "页面不是可识别的 Amazon 商品详情页。请确认 ASIN 与站点后重试。";
+    default: return "浏览器采集失败，请稍后重试。";
+  }
+}
+
+/** 单页采集（同步完成：打开 → 导航 → 提取 → 关闭）；返回 Preview，不保存 */
+export async function collectBrowserEvidencePreview(input: {
+  asin: string;
+  capturedAt: string;
+  taskId?: string;
+}): Promise<BrowserEvidenceCollectPreview> {
+  const startedAt = Date.now();
+  logInfo("amazon", "collect_started", `开始采集 Amazon 商品页面 (ASIN: ${input.asin})`, {
+    taskId: input.taskId,
+    metadata: { asin: input.asin, capturedAt: input.capturedAt },
+  }).catch(() => undefined);
+
+  const browser = resolveSystemBrowser();
+  if (!browser) {
+    const durationMs = Date.now() - startedAt;
+    logError("amazon", "collect_failed", "本机未检测到可用的 Chrome/Edge 浏览器", {
+      taskId: input.taskId,
+      metadata: { asin: input.asin, code: "browser_unavailable", durationMs },
+    }).catch(() => undefined);
+    throw new BrowserEvidenceCollectError(
+      "browser_unavailable",
+      503,
+      "本机未检测到可用的 Chrome/Edge 浏览器，无法进行页面采集。",
+    );
+  }
+  const session = await openIsolatedPublicBrowserSession({
+    browser,
+    allowedOrigins: BROWSER_EVIDENCE_ALLOWED_ORIGINS,
+    maxNavigations: 1,
+    headless: true,
+    // 币种校准：Amazon US 采集前先把配送 ZIP 切到美国并设 en_US/USD（复用 Amazon 正常 UI）
+    calibrateEnvironment: { postalCode: "10001" },
+  });
+  try {
+    // V3R（Research→Creative Consistency）：URL 显式携带 currency=USD——隔离 profile 不继承用户
+    // 币种设置，仅设 language 时页面可能按非 USD 报价；显式 currency 参数保证价格按 USD 提取。
+    const requestedUrl = `https://www.amazon.com/dp/${input.asin}?language=en_US&currency=USD`;
+    const nav = await session.navigate(requestedUrl);
+    const navigation: BrowserEvidenceNavigation = {
+      requestedUrl,
+      finalUrl: nav.finalUrl,
+      httpStatus: nav.mainDocumentHttpStatus,
+      navigationElapsedMs: nav.navigationElapsedMs,
+      allowedFinalOrigin: nav.allowedFinalOrigin,
+    };
+    if (!nav.allowedFinalOrigin) {
+      throw new BrowserEvidenceCollectError(
+        "navigation_not_allowed",
+        502,
+        "页面导航被重定向到白名单外地址，已停止采集。该状态不等同于登录墙或验证码，请检查站点或网络后重试。",
+      );
+    }
+    const extraction = await session.evaluateDomByValue<AmazonDetailPageExtraction>(
+      buildAmazonDetailPageExtractionExpression({
+        expectedAsin: input.asin,
+        capturedAt: input.capturedAt,
+        collectorVersion: BROWSER_EVIDENCE_COLLECTOR_VERSION,
+      }),
+    );
+    const failClosed = browserEvidenceFailClosedCode(extraction.pageStatus);
+    if (failClosed) {
+      throw new BrowserEvidenceCollectError(failClosed, 422, failClosedMessage(failClosed));
+    }
+    // V3 Final PHASE 1：Product Information 提取（同一会话、同一页面、实体绑定前提；
+    // 失败不阻断主采集——productInfo=null，由候选层按无规格数据处理）
+    let productInfo: AmazonProductInfoExtraction | null = null;
+    try {
+      productInfo = await session.evaluateDomByValue<AmazonProductInfoExtraction>(
+        buildAmazonProductInfoExtractionExpression({
+          expectedAsin: input.asin,
+          capturedAt: input.capturedAt,
+          collectorVersion: BROWSER_EVIDENCE_COLLECTOR_VERSION,
+        }),
+      );
+    } catch {
+      productInfo = null;
+    }
+    // Seller-authored 内容富化：同一页面、同一实体绑定；提取失败只降级为空块，不阻断基础证据。
+    let sellerContent: AmazonSellerContentBlockV1[] = [];
+    if (extraction.entityBound) {
+      try {
+        const raw = await session.evaluateDomByValue<AmazonSellerContentBlockV1[]>(
+          buildAmazonSellerContentExtractionExpression(),
+        );
+        sellerContent = normalizeSellerBlocks(Array.isArray(raw) ? raw : []);
+      } catch {
+        sellerContent = [];
+      }
+    }
+    // 币种校准结果随 preview 返回（UI 展示"已校准配送地/币种"或"仍非 Amazon US 价格环境"）
+    const durationMs = Date.now() - startedAt;
+    logInfo("amazon", "collect_succeeded", `成功提取 Amazon 页面数据 (ASIN: ${input.asin})`, {
+      taskId: input.taskId,
+      metadata: {
+        asin: input.asin,
+        title: extraction.fields?.title?.value ? String(extraction.fields.title.value).slice(0, 100) : null,
+        pageStatus: extraction.pageStatus,
+        entityBound: extraction.entityBound,
+        durationMs,
+      },
+    }).catch(() => undefined);
+    return { extraction, navigation, calibration: session.calibration, productInfo, sellerContent };
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    const errCode = error instanceof BrowserEvidenceCollectError ? error.code : "unknown_error";
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logError("amazon", "collect_failed", `Amazon 页面采集失败 (ASIN: ${input.asin}): ${errCode}`, {
+      taskId: input.taskId,
+      metadata: { asin: input.asin, code: errCode, message: errMsg, durationMs },
+    }).catch(() => undefined);
+
+    if (error instanceof BrowserEvidenceCollectError) throw error;
+    const message = error instanceof Error ? error.message : "unknown_error";
+    // P1-A：技术串只进日志，用户文案固定（不泄漏 CDP_*/ReferenceError 等）
+     
+    console.error("[browser-evidence] collect failed", { code: "collect_failed", detail: message.slice(0, 400) });
+    if (message.includes("PUBLIC_NAVIGATION_BUDGET_EXHAUSTED")) {
+      throw new BrowserEvidenceCollectError("navigation_budget_exhausted", 502, "本次采集导航预算用尽，已停止。");
+    }
+    if (message.includes("PUBLIC_BROWSER_SESSION_FAIL_CLOSED")) {
+      throw new BrowserEvidenceCollectError(
+        "browser_session_fail_closed",
+        502,
+        "浏览器会话因安全门禁进入 fail-closed，已停止采集。",
+      );
+    }
+    if (message.includes("CDP_RUNTIME_EVALUATION_FAILED")) {
+      throw new BrowserEvidenceCollectError(
+        "extraction_failed",
+        502,
+        "Amazon 商品信息采集失败，请确认商品页可正常打开后重试；若持续失败可稍后再试。",
+      );
+    }
+    throw new BrowserEvidenceCollectError(
+      "collect_failed",
+      502,
+      "Amazon 商品信息采集失败，请稍后重试；若持续失败请检查本机浏览器与网络。",
+    );
+  } finally {
+    await session.close();
+  }
+}
+
+/**
+ * ASIN 三一致硬门禁：URL ASIN = 页面锚点 ASIN = 任务绑定 ASIN；任一不满足 → 硬拒绝，无"仍然保存"。
+ * 由 API route 与真实 Smoke 共用同一实现，保证验证路径与生产路径一致。
+ */
+export function buildConfirmedSnapshot(input: {
+  preview: BrowserEvidenceCollectPreview;
+  taskAsin: string;
+  capturedAt: string;
+  context: AccessContext;
+}): BrowserEvidenceSnapshot {
+  const { preview, taskAsin, capturedAt, context } = input;
+  const extraction = preview.extraction;
+  if (extraction.schemaVersion !== "amazon-detail-page-extraction.v1") {
+    throw new BrowserEvidenceError("preview_invalid", 422, "采集预览结构无效，请重新采集。");
+  }
+  const mismatches: string[] = [];
+  if (extraction.expectedAsin !== taskAsin) mismatches.push("期望 ASIN");
+  if (extraction.urlAsin !== taskAsin) mismatches.push("URL ASIN");
+  if (extraction.pageAsin !== taskAsin) mismatches.push("页面 ASIN");
+  if (!extraction.entityBound) mismatches.push("实体绑定");
+  const proof = extraction.bindingProof;
+  if (!proof.urlMatchesExpected || !proof.pageAnchorMatchesExpected || !proof.productContainerFound) {
+    mismatches.push("绑定证明");
+  }
+  if (mismatches.length > 0) {
+    throw new BrowserEvidenceError(
+      "asin_mismatch",
+      422,
+      `页面证据与任务绑定商品不一致（${mismatches.join("、")}），已拒绝保存。请确认采集目标是正确商品后重试。`,
+    );
+  }
+  const fields = extraction.fields;
+  return {
+    evidenceId: randomUUID(),
+    sourceType: "browser",
+    sourceSite: "amazon",
+    pageUrl: preview.navigation.finalUrl,
+    marketplace: "amazon.com",
+    locale: null,
+    currency: fields.price.reason?.startsWith("currency_not_usd:")
+      ? (fields.price.reason.slice("currency_not_usd:".length) as BrowserEvidenceSnapshot["currency"])
+      : fields.price.value !== null ? "USD" : null,
+    entityBinding: {
+      bound: extraction.entityBound,
+      urlAsin: extraction.urlAsin,
+      pageAsin: extraction.pageAsin,
+      proof: extraction.bindingProof,
+    },
+    collectorVersion: BROWSER_EVIDENCE_COLLECTOR_VERSION,
+    capturedAt,
+    fields: {
+      asin: { value: fields.asin.value as string | null, status: fields.asin.status, reason: fields.asin.reason, nature: "snapshot" },
+      title: { value: fields.title.value as string | null, status: fields.title.status, reason: fields.title.reason, nature: "snapshot" },
+      price: { value: fields.price.value as number | null, status: fields.price.status, reason: fields.price.reason, nature: "snapshot" },
+      bsr: { value: fields.bsr.value as number | null, status: fields.bsr.status, reason: fields.bsr.reason, nature: "snapshot" },
+      rating: { value: fields.rating.value as number | null, status: fields.rating.status, reason: fields.rating.reason, nature: "snapshot" },
+      reviewCount: { value: fields.reviews.value as number | null, status: fields.reviews.status, reason: fields.reviews.reason, nature: "snapshot" },
+    },
+    failureReasons: Object.values(fields)
+      .map((item) => item.reason)
+      .filter((reason): reason is string => reason !== null),
+    ...(preview.productInfo && preview.productInfo.entityBound
+      ? {
+          productInfo: {
+            schemaVersion: preview.productInfo.schemaVersion,
+            rows: preview.productInfo.rows.slice(0, 60),
+            canonicalFacts: preview.productInfo.canonicalFacts,
+            capturedAt: preview.productInfo.capturedAt,
+            collectorVersion: preview.productInfo.collectorVersion,
+          },
+        }
+      : {}),
+    confirmedBy: {
+      mode: context.mode === "demo" ? "visitor" : "owner",
+      actorRef: context.mode === "demo" ? `visitor:${context.demoAccessId}` : "owner:v1",
+    },
+    confirmedAt: new Date().toISOString(),
+  };
+}

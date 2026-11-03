@@ -1,0 +1,294 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { NextRequest } from "next/server";
+
+/**
+ * /api/tasks/[id] route 测试
+ *
+ * 测试 GET / DELETE 的访问密码保护。
+ * Prisma 被 mock，只测试密码校验逻辑。
+ */
+
+const CORRECT_PASSWORD = "ci-test-password";
+
+// Build a mock record that matches toTaskItem expectations
+const mockRecord = {
+  id: "task-001",
+  createdAt: new Date("2025-01-01"),
+  updatedAt: new Date("2025-01-01"),
+  type: "viral",
+  decisionStatus: "pending",
+  title: "测试商品",
+  platform: "tiktok",
+  productUrl: null,
+  materialText: "测试素材",
+  source: "ai",
+  score: 80,
+  level: "高潜力",
+  oneLineSummary: "测试摘要",
+  resultJson: '{"score":80,"level":"高潜力"}',
+};
+
+const mockPrisma = {
+  $transaction: vi.fn(),
+  viralAnalysisRecord: {
+    findFirst: vi.fn().mockResolvedValue(mockRecord),
+    findUnique: vi.fn().mockResolvedValue(mockRecord),
+    update: vi.fn().mockResolvedValue({ id: "task-001", decisionStatus: "continue" }),
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    delete: vi.fn().mockResolvedValue(mockRecord),
+  },
+  opportunityCandidate: {
+    findFirst: vi.fn().mockResolvedValue(null),
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+  },
+};
+
+// Mock @prisma/client for Prisma.PrismaClientKnownRequestError
+vi.mock("@prisma/client", () => {
+  class PrismaClientKnownRequestError extends Error {
+    code: string;
+    constructor(message: string, { code }: { code: string }) {
+      super(message);
+      this.code = code;
+    }
+  }
+  return { Prisma: { PrismaClientKnownRequestError } };
+});
+
+vi.mock("@/lib/server/db", () => ({
+  prisma: mockPrisma,
+}));
+
+let GET: any;
+let PATCH: any;
+let DELETE: any;
+
+beforeEach(async () => {
+  vi.unstubAllEnvs();
+  vi.stubEnv("ACCESS_PASSWORD", CORRECT_PASSWORD);
+  vi.stubEnv("NODE_ENV", "test");
+  vi.clearAllMocks();
+  mockPrisma.viralAnalysisRecord.findFirst.mockResolvedValue(mockRecord);
+  mockPrisma.viralAnalysisRecord.update.mockResolvedValue({ id: "task-001", decisionStatus: "continue" });
+  mockPrisma.viralAnalysisRecord.delete.mockResolvedValue(mockRecord);
+    mockPrisma.opportunityCandidate.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.opportunityCandidate.findFirst.mockResolvedValue(null);
+  mockPrisma.$transaction.mockImplementation(async (callback: (tx: typeof mockPrisma) => Promise<unknown>) => callback(mockPrisma));
+  const mod = await import("./route");
+  GET = mod.GET;
+  PATCH = mod.PATCH;
+  DELETE = mod.DELETE;
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+function createRequest(params: {
+  url?: string;
+  headers?: Record<string, string>;
+  method?: string;
+  body?: unknown;
+}): NextRequest {
+  const urlStr = params.url ?? "http://localhost:3000/api/tasks/task-001";
+  const url = new URL(urlStr);
+  const headers = new Headers({ host: url.host, ...params.headers });
+
+  return {
+    method: params.method ?? "GET",
+    url: urlStr,
+    nextUrl: url,
+    headers,
+    json: async () => params.body ?? {},
+  } as unknown as NextRequest;
+}
+
+function createContext(id: string) {
+  return {
+    params: Promise.resolve({ id }),
+  };
+}
+
+async function getJsonStatus(response: Response) {
+  const cloned = response.clone();
+  const body = await cloned.json();
+  return { status: cloned.status, body };
+}
+
+describe("GET /api/tasks/[id]", () => {
+  it("returns the fixed Task image snapshot without trusting a mutable Candidate", async () => {
+    const taskImage = {
+      version: "market-screening-product-image.v1",
+      source: "stage15_screening_preview_cache",
+      status: "available",
+      productKey: "amazon:US:B012345678",
+      candidateIdentityHash: "1".repeat(64),
+      mimeType: "image/png",
+      bytes: 8,
+      contentHash: "4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6",
+      dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+      capturedAt: "2026-07-28T01:00:00.000Z",
+    };
+    mockPrisma.viralAnalysisRecord.findFirst.mockResolvedValueOnce({
+      ...mockRecord,
+      resultJson: JSON.stringify({
+        sourceMeta: {
+          source: "opportunity",
+          candidateId: "candidate-exact",
+          candidateSnapshot: {
+            version: 1,
+            id: "candidate-exact",
+            identityHash: "1".repeat(64),
+            productImageSnapshot: taskImage,
+          },
+        },
+        candidateToTask: { version: 1, candidateId: "candidate-exact" },
+      }),
+    });
+
+    const response = await GET(createRequest({
+      headers: { "x-access-password": CORRECT_PASSWORD },
+    }), createContext("task-001"));
+    const { body } = await getJsonStatus(response);
+
+    expect(body.data.productImage).toMatchObject({
+      provenance: "task_snapshot",
+      contentHash: taskImage.contentHash,
+      dataUrl: taskImage.dataUrl,
+    });
+    expect(mockPrisma.opportunityCandidate.findFirst).not.toHaveBeenCalled();
+  });
+
+
+
+  it("正确密码 → 返回 200 并正常查询详情", async () => {
+    const request = createRequest({
+      headers: { "x-access-password": CORRECT_PASSWORD },
+    });
+    const response = await GET(request, createContext("task-001"));
+    const { status, body } = await getJsonStatus(response);
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.data).toBeDefined();
+    expect(body.data.id).toBe("task-001");
+    expect(mockPrisma.viralAnalysisRecord.findFirst).toHaveBeenCalled();
+  });
+
+  it("详情响应不包含 accessPassword", async () => {
+    const request = createRequest({
+      headers: { "x-access-password": CORRECT_PASSWORD },
+    });
+    const response = await GET(request, createContext("task-001"));
+    const { body } = await getJsonStatus(response);
+    const responseStr = JSON.stringify(body);
+    expect(responseStr).not.toContain("accessPassword");
+    expect(responseStr).not.toContain(CORRECT_PASSWORD);
+  });
+
+  it("缺少 id → 本地单用户下返回参数错误（非 401）", async () => {
+    const request = createRequest({});
+    const response = await GET(request, createContext(""));
+    const { status } = await getJsonStatus(response);
+    // 本地单用户无登录门禁：缺参应返回 400 级别错误，而不是认证错误
+    expect(status).toBe(400);
+  });
+
+
+  it("rejects generic decisionStatus writes for versioned product-research records", async () => {
+    mockPrisma.viralAnalysisRecord.findFirst.mockResolvedValueOnce({
+      ...mockRecord,
+      resultJson: JSON.stringify({
+        researchRecord: {
+          schema: "product-research-record.v1",
+          revision: 1,
+        },
+      }),
+    });
+
+    const request = createRequest({
+      method: "PATCH",
+      headers: { "x-access-password": CORRECT_PASSWORD },
+      body: { decisionStatus: "continue" },
+    });
+    const response = await PATCH(request, createContext("task-001"));
+    const { status, body } = await getJsonStatus(response);
+
+    expect(status).toBe(409);
+    expect(body.error.code).toBe("versioned_decision_route_required");
+    expect(mockPrisma.viralAnalysisRecord.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["{bad", "invalid_result_json"],
+    [JSON.stringify({ researchRecord: "malformed" }), "versioned_decision_route_required"],
+    ...[null, "malformed", {}].map(value => [JSON.stringify({ v5Research: value }), "versioned_research_decision_route_required"]),
+  ])("fails closed instead of using the Legacy decisionStatus writer for protected data", async (resultJson, code) => {
+    mockPrisma.viralAnalysisRecord.findFirst.mockResolvedValueOnce({ ...mockRecord, resultJson });
+    const request = createRequest({
+      method: "PATCH",
+      headers: { "x-access-password": CORRECT_PASSWORD },
+      body: { decisionStatus: "continue" },
+    });
+    const response = await PATCH(request, createContext("task-001"));
+    expect(response.status).toBe(409);
+    expect((await response.json()).error.code).toBe(code);
+    expect(mockPrisma.viralAnalysisRecord.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("DELETE /api/tasks/[id]", () => {
+
+
+  it("正确密码 → 返回 200 并正常删除", async () => {
+    const request = createRequest({
+      method: "DELETE",
+      headers: { "x-access-password": CORRECT_PASSWORD },
+    });
+    const response = await DELETE(request, createContext("task-001"));
+    const { status, body } = await getJsonStatus(response);
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.data.id).toBe("task-001");
+    expect(mockPrisma.viralAnalysisRecord.delete).toHaveBeenCalled();
+    expect(mockPrisma.$transaction).toHaveBeenCalledOnce();
+    expect(mockPrisma.opportunityCandidate.updateMany).toHaveBeenCalledWith({
+      where: { convertedTaskId: "task-001" },
+      data: { convertedTaskId: null, lastActionAt: expect.any(Date) },
+    });
+  });
+
+});
+
+describe("PATCH /api/tasks/[id]", () => {
+
+  it("正确密码 → 更新人工状态（经正式 mutation layer，CAS 并发保护）", async () => {
+    const request = createRequest({
+      method: "PATCH",
+      headers: { "x-access-password": CORRECT_PASSWORD },
+      body: { decisionStatus: "continue" },
+    });
+    const response = await PATCH(request, createContext("task-001"));
+    const { status, body } = await getJsonStatus(response);
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.data.decisionStatus).toBe("continue");
+    // F5：不再直接 update 列（避免 @updatedAt 假冲突），走 updateMany CAS（resultJson 语义一致）
+    expect(mockPrisma.viralAnalysisRecord.update).not.toHaveBeenCalled();
+    expect(mockPrisma.viralAnalysisRecord.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "task-001" }),
+      data: expect.objectContaining({ decisionStatus: "continue" }),
+    }));
+  });
+
+  it("非法人工状态 → 返回 400", async () => {
+    const request = createRequest({
+      method: "PATCH",
+      headers: { "x-access-password": CORRECT_PASSWORD },
+      body: { decisionStatus: "done" },
+    });
+    const response = await PATCH(request, createContext("task-001"));
+    const { status, body } = await getJsonStatus(response);
+    expect(status).toBe(400);
+    expect(body.error.code).toBe("invalid_decision_status");
+  });
+});

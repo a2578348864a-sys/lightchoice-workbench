@@ -45,6 +45,7 @@ import {
   type V5BusinessStageTab,
 } from "@/lib/types/v5BusinessStage";
 import {
+  researchCardCtaOf,
   researchCardSystemSuggestionLabel,
   researchFindingOf,
   type ResearchListRow,
@@ -562,6 +563,11 @@ export function ResearchListClient() {
                     待决策
                   </span>
                 )}
+                {row.original.reportConsumptionBlocked ? (
+                  <Badge tone="rose">报告暂停采信</Badge>
+                ) : row.original.reportAuditVerdict === "NEEDS_DOWNGRADE" ? (
+                  <Badge tone="amber">报告需复核</Badge>
+                ) : null}
                 {display && stage !== "needs_decision" && (
                   <span className="text-[13px] text-slate-500 font-medium">
                     ({display.label}{isFinal ? "·正式" : "·临时"})
@@ -587,19 +593,18 @@ export function ResearchListClient() {
         cell: ({ row }) => {
           const item = row.original;
           const isArchived = Boolean(item.archivedAt);
+          const cta = researchCardCtaOf(item);
 
           return (
             <div className="flex items-center gap-1.5" style={{ whiteSpace: "nowrap" }}>
               {item.taskId ? (
-                <Link href={`/research/${encodeURIComponent(item.taskId)}`}>
+                <Link href={cta.href}>
                   <Button
                     size="sm"
                     variant="primary"
                     className="h-7 text-xs px-2.5"
                   >
-                    {item.researchState === "not_started"
-                      ? "开始研究"
-                      : item.myChoice?.choice ? "查看研究" : "进入决策"} <ArrowRight className="size-3 ml-0.5" />
+                    {cta.label} <ArrowRight className="size-3 ml-0.5" />
                   </Button>
                 </Link>
               ) : (

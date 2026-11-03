@@ -32,7 +32,7 @@ export type AmazonUsSessionPage = {
 
 export type AmazonUsSessionEnvironmentResult = {
   ok: boolean;
-  errorCode: "AMAZON_US_SESSION_CALIBRATION_FAILED" | "AMAZON_CAPTURE_PREFLIGHT_FAILED" | "MARKETPLACE_MISMATCH" | "LOCALE_MISMATCH" | "PAGE_CHANGED" | null;
+  errorCode: "AMAZON_US_SESSION_CALIBRATION_FAILED" | "AMAZON_CAPTURE_PREFLIGHT_FAILED" | "MARKETPLACE_MISMATCH" | "LOCALE_MISMATCH" | "LOGIN_REQUIRED" | "PAGE_CHANGED" | null;
   errorMessage: string | null;
   networkPreflight: "US_READY" | "NON_US_EXIT" | "UNKNOWN";
   hostname: string;
@@ -41,6 +41,8 @@ export type AmazonUsSessionEnvironmentResult = {
   deliveryAfter: "US" | "NON_US" | "UNKNOWN";
   language: string;
   pageStatus: "ok" | "blocked";
+  /** true=已登录，false=明确未登录，null=页面未暴露可判定的登录标记。 */
+  signedIn: boolean | null;
   /** 当前 / 最终所处阶段；成功时为 SESSION_READY。 */
   stage: AmazonSessionStage;
   /** 失败锚点：失败发生在哪一步（成功时为 null）。 */
@@ -98,25 +100,46 @@ export function toAmazonSessionFailureReport(
   };
 }
 
-type PageSignals = { delivery: string; language: string; title: string; marker: boolean };
+type PageSignals = { delivery: string; language: string; title: string; marker: boolean; signedIn: boolean | null };
 type DeliveryStatus = "US" | "NON_US" | "UNKNOWN";
 
-async function waitForAmazonHomeMarker(page: AmazonUsSessionPage): Promise<void> {
+/**
+ * 一次有界等待：导航栏 logo、配送地区和登录行通常是分批水合的。
+ * 只等待 DOM 出现，不做重试、不刷新、不轮换会话；超时后仍按原门禁 fail-closed。
+ */
+async function waitForAmazonHomeSignals(page: AmazonUsSessionPage): Promise<void> {
   if (typeof page.waitForSelector !== "function") return;
-  await page.waitForSelector(AMAZON_HOME_MARKER_SELECTOR, {
-    state: "attached",
-    timeout: AMAZON_HOME_MARKER_WAIT_MS,
-  }).catch(() => undefined);
+  await Promise.all([
+    page.waitForSelector(AMAZON_HOME_MARKER_SELECTOR, {
+      state: "attached",
+      timeout: AMAZON_HOME_MARKER_WAIT_MS,
+    }).catch(() => undefined),
+    page.waitForSelector("#glow-ingress-line2, #nav-global-location-data-modal-action", {
+      state: "attached",
+      timeout: AMAZON_HOME_MARKER_WAIT_MS,
+    }).catch(() => undefined),
+    page.waitForSelector("#nav-link-accountList-nav-line-1", {
+      state: "attached",
+      timeout: AMAZON_HOME_MARKER_WAIT_MS,
+    }).catch(() => undefined),
+  ]);
 }
 
 async function readSignals(page: AmazonUsSessionPage): Promise<PageSignals> {
   return page.evaluate<PageSignals>(`(() => {
-    const delivery = document.querySelector('#glow-ingress-line2, #nav-global-location-data-modal-action')?.textContent || '';
+    const deliveryNode = document.querySelector('#glow-ingress-line2')
+      || document.querySelector('#nav-global-location-data-modal-action')
+      || document.querySelector('#glow-ingress-block');
+    const delivery = deliveryNode?.textContent || '';
+    // 只读取导航栏的登录/登出标记，不读取账号名，也不输出任何凭据。
+    const accountLine = document.querySelector('#nav-link-accountList-nav-line-1')?.textContent || '';
+    const normalizedAccountLine = accountLine.replace(/\\s+/g, ' ').trim();
     return {
       delivery: delivery.replace(/\\s+/g, ' ').trim(),
       language: document.documentElement.lang || '',
       title: document.title || '',
       marker: Boolean(document.querySelector('#nav-logo-sprites, #nav-logo')),
+      signedIn: normalizedAccountLine ? !/sign\\s*in/i.test(normalizedAccountLine) : null,
     };
   })()`);
 }
@@ -221,6 +244,7 @@ export async function ensureAmazonUsSessionEnvironment(input: {
     deliveryAfter: "UNKNOWN" as const,
     language: "",
     pageStatus: "blocked" as const,
+    signedIn: null as boolean | null,
   };
   let hostname = "";
   let deliveryBefore: DeliveryStatus = "UNKNOWN";
@@ -230,6 +254,7 @@ export async function ensureAmazonUsSessionEnvironment(input: {
   let calibrationAttempted = false;
   let language = "";
   let pageStatus: "ok" | "blocked" = "blocked";
+  let signedIn: boolean | null = null;
   if (input.networkPreflight !== "US_READY") {
     // 非美国出口没有 session 级 failureKind：网络原因由 networkPreflight 表达，
     // 且此处绝不启动浏览器。
@@ -243,7 +268,7 @@ export async function ensureAmazonUsSessionEnvironment(input: {
     await gotoWithBoundedTimeout("https://www.amazon.com/");
     // A new browser context may finish DOMContentLoaded before Amazon hydrates
     // the navigation header. Wait once on the same page before classifying it.
-    await waitForAmazonHomeMarker(page);
+    await waitForAmazonHomeSignals(page);
     hostname = new URL(page.url()).hostname.toLowerCase();
     stage = "READ_PAGE_STATUS";
     const before = await readSignals(page);
@@ -251,6 +276,7 @@ export async function ensureAmazonUsSessionEnvironment(input: {
     deliveryAfter = deliveryBefore;
     sessionDeliveryBefore = diagnosticDeliveryLabel(before.delivery, deliveryBefore);
     sessionDeliveryAfter = sessionDeliveryBefore;
+    signedIn = before.signedIn ?? null;
     const initialStatus = /captcha|robot check|sorry/i.test(before.title) || !before.marker ? "blocked" : "ok";
     pageStatus = initialStatus;
     language = before.language.toLowerCase();
@@ -261,6 +287,7 @@ export async function ensureAmazonUsSessionEnvironment(input: {
       deliveryAfter: deliveryBefore,
       language,
       pageStatus: initialStatus as "ok" | "blocked",
+      signedIn,
     };
     if (hostname !== "www.amazon.com" && hostname !== "amazon.com") {
       fail("READ_PAGE_STATUS", "MARKETPLACE_MISMATCH");
@@ -271,6 +298,11 @@ export async function ensureAmazonUsSessionEnvironment(input: {
       fail("READ_PAGE_STATUS", "AMAZON_ERROR_PAGE");
       await report(sessionDeliveryBefore, false, sessionDeliveryAfter, "BLOCKED");
       return { ...initial, ...diagnostics(), ok: false, errorCode: "PAGE_CHANGED", errorMessage: `Amazon 会话页面状态不可用，未进行配送校准。${failureSuffix()}` };
+    }
+    if (signedIn === false) {
+      fail("READ_PAGE_STATUS", "LOGIN_REQUIRED");
+      await report(sessionDeliveryBefore, false, sessionDeliveryAfter, "BLOCKED");
+      return { ...initial, ...diagnostics(), ok: false, errorCode: "LOGIN_REQUIRED", errorMessage: `Amazon 会话未登录；请在专用浏览器中完成登录后重试。${failureSuffix()}` };
     }
     stage = "READ_DELIVERY_SIGNAL";
     if (deliveryBefore === "UNKNOWN") {
@@ -300,7 +332,7 @@ export async function ensureAmazonUsSessionEnvironment(input: {
       }
       stage = "OPEN_AMAZON_HOME";
       await gotoWithBoundedTimeout("https://www.amazon.com/");
-      await waitForAmazonHomeMarker(page);
+      await waitForAmazonHomeSignals(page);
     }
     stage = "VERIFY_DELIVERY";
     const afterSignals = calibrationAttempted ? await readSignals(page) : before;

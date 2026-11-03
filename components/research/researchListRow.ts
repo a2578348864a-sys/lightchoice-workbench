@@ -11,12 +11,22 @@ export type ResearchFinding = {
 
 /** 服务端没给结构化发现时（旧响应/待生成任务）的兜底：只降级措辞，不编造结论。 */
 export function researchFindingOf(row: ResearchListRow): ResearchFinding {
+  // 报告被强度审查暂停采信时，优先展示报告状态；不能把报告原文继续当作当前发现。
+  if (row.reportConsumptionBlocked) {
+    return {
+      status: "HISTORICAL",
+      label: "报告暂停采信",
+      text: null,
+      basis: row.reportConsumptionNotice ?? "研报存在超过证据强度的结论，需复核后采信",
+    };
+  }
+  // 来源失效优先于服务端可能仍标记为 CURRENT 的旧发现，避免历史结论被展示成当前结论。
+  if (row.stale) {
+    return { status: "HISTORICAL", label: "历史研报需复核", text: null, basis: "来源已变化，历史结论不能直接采信" };
+  }
   if (row.finding) return row.finding;
   if (row.researchState === "not_started") {
     return { status: "NOT_STARTED", label: "尚未研究", text: null, basis: "还没有生成研报" };
-  }
-  if (row.stale) {
-    return { status: "HISTORICAL", label: "历史研报需复核", text: null, basis: "来源已变化，历史结论不能直接采信" };
   }
   const legacy = row.findingPreview?.trim();
   if (legacy) {
@@ -77,6 +87,11 @@ export type ResearchListRow = {
     jevAtomicJudgmentSet: null;
   };
   stale: boolean;
+  /** 研报强度审查结论（服务端详情/列表共用同一投影）；null 表示无审查结果。 */
+  reportAuditVerdict?: "CONSISTENT" | "NEEDS_DOWNGRADE" | "BLOCKED" | "UNAVAILABLE" | null;
+  /** true = 研报被暂停采信，人工决策/04 交接必须阻断。 */
+  reportConsumptionBlocked?: boolean;
+  reportConsumptionNotice?: string | null;
   archivedAt: string | null;
   updatedAt: string;
   resourceVersion?: string;
@@ -108,6 +123,19 @@ export function researchCardStatusOf(row: ResearchListRow): { label: string; ton
   if (row.researchState === "not_started") return { label: "未开始研究", tone: "muted" };
   if (row.researchState === "in_progress") return { label: "研究进行中", tone: "warn" };
   const stage = row.businessStage ? BUSINESS_STAGES[row.businessStage] : null;
+  // 报告被暂停采信/需降级时优先展示报告状态，不能继续显示成可执行的「待决策」。
+  if (row.reportConsumptionBlocked) {
+    return { label: stage ? `报告暂停采信 · ${stage.label}` : "报告暂停采信", tone: "risk" };
+  }
+  if (row.reportAuditVerdict === "NEEDS_DOWNGRADE") {
+    return { label: stage ? `报告需复核 · ${stage.label}` : "报告需复核", tone: "warn" };
+  }
+  if (row.reportAuditVerdict === "UNAVAILABLE") {
+    return { label: "报告审查不可用", tone: "warn" };
+  }
+  if (row.stale) {
+    return { label: stage ? `需重新确认 · ${stage.label}` : "需重新确认", tone: "warn" };
+  }
   if (!stage) return { label: "待决策", tone: "warn" };
   switch (stage.stage) {
     case "needs_decision":
@@ -133,7 +161,9 @@ export function researchCardCtaOf(row: ResearchListRow): { label: string; href: 
   if (!row.taskId) return { label: "待生成任务", href: "/source", muted: true };
   const href = "/research/" + encodeURIComponent(row.taskId);
   if (row.researchState === "not_started") return { label: "开始研究", href, muted: false };
-  if (row.stale) return { label: "复核研究", href, muted: false };
+  if (row.reportConsumptionBlocked || row.reportAuditVerdict === "NEEDS_DOWNGRADE" || row.reportAuditVerdict === "UNAVAILABLE" || row.stale) {
+    return { label: "复核研究", href, muted: false };
+  }
   if (row.myChoice?.choice) return { label: "查看研究", href, muted: false };
   return { label: "进入决策", href, muted: false };
 }

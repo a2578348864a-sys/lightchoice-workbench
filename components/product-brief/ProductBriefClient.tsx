@@ -188,6 +188,12 @@ function gateBlockMessage(reason: string | null): string {
   }
 }
 
+/** 无需求单空态：stale 来自服务端真实门禁；非 stale 表示服务端已允许生成。 */
+export function briefEmptyStateMessage(stale: boolean, staleReason: string | null): string {
+  if (stale) return gateBlockMessage(staleReason);
+  return "已满足生成条件：可从当前研究生成需求单。生成只读取当前研究、商品事实、买家声音和市场来源依据，不调用外部 AI。";
+}
+
 export function ProductBriefClient({ taskId }: { taskId: string }) {
   const [data, setData] = useState<BriefResponse | null>(null);
   const [briefView, setBriefView] = useState<BriefTab>("plan");
@@ -805,7 +811,7 @@ export function ProductBriefClient({ taskId }: { taskId: string }) {
           <div className={styles.stateCard}>
             <FileText size={30} aria-hidden="true" />
             <h2>尚未形成产品开发需求单</h2>
-            <p>{data?.stale ? gateBlockMessage(data.staleReason) : "必须先在 03 商品闸门选择「继续推进」。生成过程只读取当前研究、商品事实、买家声音和市场来源依据，不调用外部 AI。"}</p>
+            <p>{briefEmptyStateMessage(Boolean(data?.stale), data?.staleReason ?? null)}</p>
             <div className={styles.heroActions}>
               <Link className={styles.secondaryAction} href={`/research/${encodeURIComponent(taskId)}`}>前往商品研究页</Link>
               <button type="button" className={styles.primaryAction} onClick={() => void generate()} disabled={busy || Boolean(data?.stale)} title={data?.stale ? gateBlockMessage(data.staleReason) : undefined}>

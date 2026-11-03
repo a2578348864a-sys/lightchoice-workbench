@@ -46,4 +46,17 @@ describe("Amazon multi-page search environment gate", () => {
     expect(missingCurrency.failedStage).toBe("currency_verification");
     expect(missingCurrency.errorCodes).toContain("currency_not_usd");
   });
+
+  it("accepts a US page when some result cards have no visible price but all observed prices are USD", () => {
+    const observations = Array.from({ length: 60 }, (_, index) => ({
+      priceCurrency: index === 59 ? null : "USD",
+    })) as AmazonSearchPageExtraction["observations"];
+    const result = evaluateAmazonSearchPageEnvironment(
+      signals("Deliver to New York 10001"),
+      { pageStatus: "ok", observations },
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.observed.currency).toBe("USD");
+  });
 });

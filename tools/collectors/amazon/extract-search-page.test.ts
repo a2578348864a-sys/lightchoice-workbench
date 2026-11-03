@@ -171,6 +171,17 @@ describe("amazon public-page collector policy", () => {
       language: "en-us",
     });
 
+    const usSignals = {
+      pageUrl: "https://www.amazon.com/s?k=closet+organizer",
+      amazonBrandMarkerPresent: true,
+      deliveryRegion: "Delivering to New York 10001",
+      language: "en-us",
+    };
+    // 无价格样本不能抹掉已观测的 USD；全无价格或出现相反币种仍然 fail-closed。
+    expect(deriveObservedAmazonMarketContext(usSignals, ["USD", null], "10001").currency).toBe("USD");
+    expect(deriveObservedAmazonMarketContext(usSignals, [null], "10001").currency).toBeNull();
+    expect(deriveObservedAmazonMarketContext(usSignals, ["USD", "JPY", null], "10001").currency).toBeNull();
+
     expect(deriveObservedAmazonMarketContext({
       pageUrl: "https://www.amazon.com/s?k=closet+organizer",
       amazonBrandMarkerPresent: false,

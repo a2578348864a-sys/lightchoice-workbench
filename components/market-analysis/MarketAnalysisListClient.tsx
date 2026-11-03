@@ -27,6 +27,7 @@ import { buildAccessHeaders } from "@/lib/client/accessToken";
 import { pruneSelection, resolveSelectedItems } from "@/lib/client/stableRowSelection";
 import type { ColumnDef, RowSelectionState } from "@tanstack/react-table";
 import styles from "./MarketAnalysisList.module.css";
+import { marketListGatePresentation } from "./gateStatusLabels";
 
 export type MarketScanSummary = {
   id: string;
@@ -44,27 +45,11 @@ export type MarketScanSummary = {
   updatedAt?: string;
   /** 以下字段来自正式列表接口，用于呈现真实研究主体与门禁状态；缺失时不补造。 */
   nicheDefinition?: { label?: string | null } | null;
-  marketGate?: { status?: string | null; chosenAt?: string | null } | null;
+  marketGate?: { status?: string | null; effectiveStatus?: string | null; stale?: boolean | null; staleReason?: string | null; chosenAt?: string | null } | null;
   representatives?: { items?: unknown[] | null } | null;
   sampleSufficiency?: { status?: string | null; validSampleCount?: number | null; minimumValidSampleCount?: number | null } | null;
   sourceBatchCoverage?: { sourceBatchId?: string | null } | null;
   sampleDefinition?: { origin?: string | null; productBatchId?: string | null } | null;
-};
-
-const GATE_LABELS: Record<string, string> = {
-  PROCEED: "允许继续研究",
-  VALIDATE_MORE: "补充验证",
-  PAUSE: "暂缓",
-  DROP: "放弃",
-  PENDING: "待人工判断",
-};
-
-const GATE_TONES: Record<string, "ok" | "warn" | "muted"> = {
-  PROCEED: "ok",
-  VALIDATE_MORE: "warn",
-  PAUSE: "warn",
-  DROP: "muted",
-  PENDING: "muted",
 };
 
 /** 时间只做展示：来源观察时间、建立时间与最近更新时间是三种不同语义，分开标注。 */
@@ -381,12 +366,11 @@ export function MarketAnalysisListClient() {
       header: "市场判断",
       enableSorting: false,
       cell: ({ row }) => {
-        const gate = row.original.marketGate?.status ?? null;
-        if (!gate) return <span className="text-xs text-slate-400">未记录</span>;
+        const gate = marketListGatePresentation(row.original.marketGate);
         return (
           <div className="flex flex-col text-xs">
-            <span className={gate === "PROCEED" ? "font-semibold text-emerald-700 whitespace-nowrap" : "text-slate-600 whitespace-nowrap"}>{GATE_LABELS[gate] ?? gate}</span>
-            <span className="text-[12px] text-slate-400">{row.original.marketGate?.chosenAt ? formatTime(row.original.marketGate.chosenAt) : "尚未保存判断"}</span>
+            <span className={gate.tone === "ok" ? "font-semibold text-emerald-700 whitespace-nowrap" : "text-slate-600 whitespace-nowrap"}>{gate.label}</span>
+            <span className="text-[12px] text-slate-400">{gate.note ?? (row.original.marketGate?.chosenAt ? formatTime(row.original.marketGate.chosenAt) : "尚未保存判断")}</span>
           </div>
         );
       },
@@ -473,7 +457,7 @@ export function MarketAnalysisListClient() {
 
   const summary = useMemo(() => {
     const totalSamples = scans.reduce((sum, scan) => sum + (Number.isFinite(scan.sampleCount) ? scan.sampleCount : 0), 0);
-    const proceed = scans.filter((scan) => scan.marketGate?.status === "PROCEED").length;
+    const proceed = scans.filter((scan) => marketListGatePresentation(scan.marketGate).key === "PROCEED").length;
     const reps = scans.reduce((sum, scan) => sum + representativeCount(scan), 0);
     return { totalSamples, proceed, reps };
   }, [scans]);
@@ -617,13 +601,13 @@ export function MarketAnalysisListClient() {
               <>
                 <div className={styles.cardGrid}>
                   {filteredScans.slice(0, cardLimit).map((scan) => {
-                    const gate = scan.marketGate?.status ?? null;
+                    const gate = marketListGatePresentation(scan.marketGate);
                     const niche = scan.nicheDefinition?.label;
                     const price = priceText(scan.medianPrice, scan.marketplace);
                     const reps = representativeCount(scan);
                     const batch = batchOf(scan);
                     return (
-                      <article className={styles.card} key={scan.id} data-gate={gate ?? "NONE"} data-testid="market-scan-card">
+                      <article className={styles.card} key={scan.id} data-gate={gate.key} data-testid="market-scan-card">
                         <div className={styles.cardTop}>
                           <div className={styles.chips}>
                             {niche && niche !== scan.scanName ? <span className={styles.chip} data-kind="niche" title={niche}>{niche}</span> : null}
@@ -644,8 +628,8 @@ export function MarketAnalysisListClient() {
                         <h3 className={styles.cardTitle}><Link href={"/market-analysis/" + scan.id}>{scan.scanName}</Link></h3>
 
                         <div className={styles.statusRow}>
-                          <span className={styles.status} data-tone={gate ? GATE_TONES[gate] ?? "muted" : "muted"}>
-                            {gate ? GATE_LABELS[gate] ?? gate : "未记录市场判断"}
+                          <span className={styles.status} data-tone={gate.tone}>
+                            {gate.label}
                           </span>
                           <span className={styles.status} data-tone={reps > 0 ? "ok" : "muted"}>
                             {reps > 0 ? `已保存代表 ${reps} 款` : "尚无已保存代表"}

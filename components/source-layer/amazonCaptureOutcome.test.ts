@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { classifyAmazonCaptureFailure, formatAmazonCaptureRequestFailure, resolveAmazonCaptureOutcome } from "./amazonCaptureOutcome";
+import { amazonCaptureFailureGuidance, classifyAmazonCaptureFailure, formatAmazonCaptureRequestFailure, resolveAmazonCaptureOutcome } from "./amazonCaptureOutcome";
 
 describe("classifyAmazonCaptureFailure", () => {
   it.each([
     ["CAPTCHA_DETECTED", "human_confirmation"],
     ["HUMAN_REQUIRED", "human_confirmation"],
     ["LOGIN_REQUIRED", "login_required"],
-    ["LOCAL_ENVIRONMENT_REQUIRED", "environment_unavailable"],
+    ["LOCAL_ENVIRONMENT_REQUIRED", "acquisition_disabled"],
     ["PLAYWRIGHT_RUNTIME_MISSING", "environment_unavailable"],
     ["PLAYWRIGHT_BROWSER_FAILED", "network"],
+    ["LOCALE_MISMATCH", "market_locale"],
+    ["MARKETPLACE_MISMATCH", "marketplace_mismatch"],
+    ["AMAZON_US_SESSION_CALIBRATION_FAILED", "session_unavailable"],
+    ["AMAZON_CAPTURE_NON_US_EXIT", "network_exit"],
+    ["BATCH_CAPTURE_SCOPE_DISABLED", "scope_disabled"],
+    ["AMAZON_CAPTURE_PREFLIGHT_FAILED", "network"],
     ["ASIN_BUDGET_INVALID", "invalid_input"],
     ["REVIEW_SOURCE_UNAVAILABLE", "network"],
     ["REVIEW_EXTRACTION_EMPTY", "page_changed"],
@@ -16,6 +22,12 @@ describe("classifyAmazonCaptureFailure", () => {
     ["UNRECOGNIZED_CODE", "unknown"],
   ] as const)("maps %s to %s", (code, expected) => {
     expect(classifyAmazonCaptureFailure(code)).toBe(expected);
+  });
+
+  it("does not collapse scope or locale failures into the generic environment message", () => {
+    expect(amazonCaptureFailureGuidance("scope_disabled").title).toBe("批量采集未开放");
+    expect(amazonCaptureFailureGuidance("market_locale").title).toBe("页面地区或币种不符");
+    expect(amazonCaptureFailureGuidance("environment_unavailable").title).not.toBe("批量采集未开放");
   });
 });
 

@@ -15,13 +15,24 @@ describe("AmazonCapturePanel 出口预检与环境可控性契约测试", () => 
     expect(source).toContain("<RefreshCw");
   });
 
-  it("手动重新检测在美国出口通过后读取并展示真实 Session Readiness", () => {
+  it("打开弹窗即自动检测出口并读取真实 Session Readiness", () => {
     expect(source).toContain('"/api/source-layer/amazon-session-readiness"');
     expect(source).toContain("if (nextPreflight.status === \"US_READY\")");
+    expect(source).toContain("void checkPreflight(true)");
     expect(source).toContain("onClick={() => void checkPreflight(true)}");
     expect(source).toContain('data-testid="amazon-session-readiness"');
     expect(source).toContain("Chrome/Edge 已启动");
     expect(source).toContain("sessionReadiness.errorCode ?? sessionReadiness.status");
+  });
+
+  it("区分网络/会话/授权状态，并在会话未通过时禁止提交", () => {
+    expect(source).toContain("sessionReadiness.sessionReady && (mode !== \"search\"");
+    expect(source).toContain('data-testid="capture-authorization-status"');
+    expect(source).toContain("需登录");
+    expect(source).toContain("已开放");
+    expect(source).toContain("未开放");
+    expect(source).toContain("登录状态");
+    expect(source).toContain("signedIn");
   });
 
   it("当出口非美时，禁用提交并提示切换美国节点", () => {

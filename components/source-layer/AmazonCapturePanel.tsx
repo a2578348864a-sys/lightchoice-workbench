@@ -84,6 +84,9 @@ type AmazonSessionReadinessState = {
   message: string | null;
   delivery: "US" | "NON_US" | "UNKNOWN" | null;
   language: string | null;
+  signedIn?: boolean | null;
+  failureStage?: string | null;
+  failureKind?: string | null;
 };
 
 type CaptureResponse = {
@@ -300,7 +303,8 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
   }, [checkAmazonSessionReadiness]);
 
   useEffect(() => {
-    void checkPreflight();
+    // 打开采集弹窗即执行真实预检查（出口 + Amazon 会话）；未通过前不允许提交。
+    void checkPreflight(true);
   }, [checkPreflight]);
 
   useEffect(() => {
@@ -404,17 +408,36 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
   const knownSessionBlocked = !sessionReadiness.loading && !sessionReadiness.sessionReady
     && !["IDLE", "CHECKING"].includes(sessionReadiness.status);
   const canSubmit = hasInput && preflight.status === "US_READY" && !preflight.loading
-    && !sessionReadiness.loading && !knownSessionBlocked && (mode !== "search" || !customLimitError);
+    && !sessionReadiness.loading && sessionReadiness.sessionReady && (mode !== "search" || !customLimitError);
   const networkReady = !preflight.loading && preflight.status === "US_READY";
-  const sessionLabel = sessionReadiness.loading ? "核验中" : sessionReadiness.sessionReady ? "已通过" : sessionReadiness.status === "IDLE" ? "待核验" : "需处理";
+  const sessionLabel = sessionReadiness.loading || sessionReadiness.status === "CHECKING" ? "核验中"
+    : sessionReadiness.sessionReady
+      ? sessionReadiness.signedIn === true ? "已通过" : "已通过 · 登录待确认"
+      : sessionReadiness.status === "IDLE" ? "待核验"
+        : sessionReadiness.errorCode === "LOGIN_REQUIRED" || sessionReadiness.errorCode === "LOGIN_WALL" ? "需登录"
+          : sessionReadiness.errorCode === "CAPTCHA_DETECTED" || sessionReadiness.errorCode === "HUMAN_REQUIRED" || sessionReadiness.errorCode === "AUTOMATION_BLOCKED" ? "需人工确认"
+            : sessionReadiness.errorCode === "PROFILE_IN_USE" || sessionReadiness.errorCode === "PROFILE_LOCK_UNAVAILABLE" ? "浏览器占用"
+              : sessionReadiness.status === "ACQUISITION_DISABLED" ? "未开放"
+                : sessionReadiness.errorCode === "LOGIN_STATE_UNKNOWN" ? "登录待确认"
+                  : sessionReadiness.status === "PREFLIGHT_BLOCKED" ? "网络未通过"
+                    : "需处理";
+  const authorizationLabel = sessionReadiness.status === "ACQUISITION_DISABLED" ? "未开放"
+    : ["IDLE", "CHECKING", "PREFLIGHT_BLOCKED", "ERROR"].includes(sessionReadiness.status) ? "待核验"
+      : "已开放";
+  const authorizationTone = authorizationLabel === "已开放" ? "ok" : authorizationLabel === "未开放" ? "warn" : "pending";
   const networkLabel = preflight.loading ? "检查中" : networkReady ? "美国出口" : preflight.status === "NON_US_EXIT" ? "非美国出口" : preflight.status === "PROXY_INVALID" ? "配置异常" : "尚未确认";
   const blockingReason = preflight.loading ? "正在检查网络出口…"
     : !networkReady ? preflight.status === "NON_US_EXIT" ? "当前出口非美国，采集已禁用。请切换美国节点后重新检查。" : preflight.status === "PROXY_INVALID" ? "代理配置异常，请修复后重新检查。" : "尚未确认美国出口，请重新检查网络。"
-    : sessionReadiness.loading ? "正在核验 Amazon 会话…"
-    : knownSessionBlocked ? sessionReadiness.status === "ACQUISITION_DISABLED" ? "当前环境未开放采集，请先确认采集授权。" : sessionReadiness.message || "会话尚未通过核验，请处理后重新检查。"
+    : sessionReadiness.loading || sessionReadiness.status === "CHECKING" ? "正在核验 Amazon 会话…"
+    : knownSessionBlocked ? sessionReadiness.errorCode === "LOGIN_REQUIRED" || sessionReadiness.errorCode === "LOGIN_WALL"
+      ? "需要人工登录 Amazon：请在专用浏览器完成登录后点击重新检查。"
+      : sessionReadiness.status === "ACQUISITION_DISABLED" ? "当前环境未开放采集，请先确认采集授权。"
+        : sessionReadiness.message || "会话尚未通过核验，请处理后重新检查。"
     : !hasInput ? mode === "search" ? "输入关键词，选择本次采集数量。" : "输入一个 10 位 ASIN，开始补录商品事实。"
     : customLimitError && mode === "search" ? customLimitError
-    : sessionReadiness.sessionReady ? "环境检查已通过，实际结果以来源页面与服务端校验为准。" : "美国出口已通过；会话、登录与页面权限将在提交后继续核验。";
+    : !sessionReadiness.sessionReady ? "请先完成 Amazon 会话核验；未通过前不会启动采集。"
+    : sessionReadiness.signedIn === null ? "环境检查已通过；登录状态未确认，提交后仍由服务端核验。"
+    : "环境检查已通过，实际结果以来源页面与服务端校验为准。";
   const resultTone = result ? receipt?.partial ? "partial" : "success" : ["human_confirmation", "login_required"].includes(failureKind) ? "human" : "error";
   const resultTitle = result ? receipt?.partial ? "已保存部分结果" : "采集结果已保存" : resultTone === "human" ? "需要你处理" : "本次采集未完成";
   const savedCount = mode === "search" ? receipt?.productBatchHandoff?.itemCount : receipt?.capture?.readyCount;
@@ -468,8 +491,8 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
               <div className={styles.sectionHeading}><span className={styles.label}>采集前检查</span><button type="button" onClick={() => void checkPreflight(true)} disabled={busy || preflight.loading || sessionReadiness.loading} data-testid="capture-recheck"><RefreshCw size={14} className={preflight.loading || sessionReadiness.loading ? styles.spin : undefined} aria-hidden="true" />重新检查</button></div>
               <div className={styles.conditions}>
                 <div data-tone={networkReady ? "ok" : preflight.loading ? "pending" : "warn"}><Globe2 size={17} aria-hidden="true" /><span>网络出口</span><b data-testid="capture-network-status">{networkLabel}</b></div>
-                <div data-tone={sessionReadiness.sessionReady ? "ok" : sessionReadiness.status === "IDLE" || sessionReadiness.loading ? "pending" : "warn"} data-testid="amazon-session-readiness"><ShieldCheck size={17} aria-hidden="true" /><span>Amazon 会话</span><b>{sessionLabel}</b></div>
-                <div data-tone={sessionReadiness.status === "ACQUISITION_DISABLED" ? "warn" : "pending"}><LockKeyhole size={17} aria-hidden="true" /><span>采集授权</span><b>{sessionReadiness.status === "ACQUISITION_DISABLED" ? "未开放" : "服务端核验"}</b></div>
+                <div data-tone={sessionReadiness.sessionReady ? (sessionReadiness.signedIn === true ? "ok" : "pending") : sessionReadiness.status === "IDLE" || sessionReadiness.loading ? "pending" : "warn"} data-testid="amazon-session-readiness"><ShieldCheck size={17} aria-hidden="true" /><span>Amazon 会话</span><b>{sessionLabel}</b></div>
+                <div data-tone={authorizationTone} data-testid="capture-authorization-status"><LockKeyhole size={17} aria-hidden="true" /><span>采集授权</span><b>{authorizationLabel}</b></div>
               </div>
               <p className={styles.readinessNote}>重新检查可能打开专用浏览器，不会自动开始采集。</p>
             </section>
@@ -508,6 +531,7 @@ export function AmazonCapturePanel({ onCaptured, onRefresh, initialMode = "detai
           <p>美国站范围不变；网络出口：{networkReady ? "美国 · 已通过检查" : networkLabel}。{preflight.message}</p>
           <p>实际采集：出口通过不代表登录、配送地区、语言和页面可读性全部通过。</p>
           <p>会话状态：{sessionReadiness.errorCode ?? sessionReadiness.status}；{sessionReadiness.browserLaunched ? "Chrome/Edge 已启动" : "未确认浏览器已启动"}。{sessionReadiness.message}</p>
+          <p>登录状态：{sessionReadiness.signedIn === true ? "已登录" : sessionReadiness.signedIn === false ? "未登录" : "未确认"}；失败阶段：{sessionReadiness.failureStage ?? "无"}；失败类型：{sessionReadiness.failureKind ?? "无"}。</p>
           {sessionReadiness.sessionReady && <p>配送地区：{sessionReadiness.delivery ?? "UNKNOWN"} · 语言：{sessionReadiness.language || "UNKNOWN"}</p>}
           {receipt && <p>操作编号：{receipt.operationId || "未提供"} · 追踪号：{receipt.traceId || "未提供"} · 来源状态：{receipt.status || "未提供"}</p>}
           <p>登录、验证码和平台许可不会被自动绕过；有证据不代表资料全部完整。</p>

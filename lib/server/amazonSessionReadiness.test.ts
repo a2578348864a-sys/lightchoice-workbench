@@ -64,7 +64,7 @@ function fakePage(delivery: string, language = "en-US", calibrates = true) {
     goto,
     url: () => "https://www.amazon.com/",
     title: async () => "Amazon.com. Spend less. Smile more.",
-    evaluate: async <T>() => ({ delivery: currentDelivery, language, title: "Amazon.com", marker: true }) as T,
+    evaluate: async <T>() => ({ delivery: currentDelivery, language, title: "Amazon.com", marker: true, signedIn: true }) as T,
     locator: (_selector: string) => ({
       click: async () => undefined,
       fill: async () => { await fill(); },

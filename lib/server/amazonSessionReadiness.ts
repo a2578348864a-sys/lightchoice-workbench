@@ -57,6 +57,8 @@ export type AmazonSessionReadinessResult = {
   pageStatus: "ok" | "blocked";
   delivery: "US" | "NON_US" | "UNKNOWN";
   language: string;
+  /** true=已登录，false=明确未登录，null=未读到可判定的登录标记。 */
+  signedIn: boolean | null;
   calibrationAttempted: boolean;
   failureStage: AmazonSessionStage | null;
   failureKind: AmazonSessionFailureKind | null;
@@ -166,6 +168,7 @@ export async function checkAmazonSessionReadiness(input: {
     pageStatus: "blocked" as "ok" | "blocked",
     delivery: "UNKNOWN" as "US" | "NON_US" | "UNKNOWN",
     language: "",
+    signedIn: null as boolean | null,
     calibrationAttempted: false,
     failureStage: null as AmazonSessionStage | null,
     failureKind: null as AmazonSessionFailureKind | null,
@@ -205,6 +208,7 @@ export async function checkAmazonSessionReadiness(input: {
         `pageStatus=${result.pageStatus}`,
         `delivery=${result.delivery}`,
         `language=${result.language || "UNKNOWN"}`,
+        `signedIn=${result.signedIn === null ? "UNKNOWN" : String(result.signedIn)}`,
         `calibrationAttempted=${result.calibrationAttempted}`,
         `sessionReady=${result.sessionReady}`,
         `failureStage=${result.failureStage ?? "NONE"}`,
@@ -274,14 +278,18 @@ export async function checkAmazonSessionReadiness(input: {
       traceId,
     });
     const report = toAmazonSessionFailureReport(sessionEnvironment);
-    const sessionReady = sessionEnvironment.ok && sessionEnvironment.stage === "SESSION_READY";
+    const signedIn = sessionEnvironment.signedIn ?? null;
+    const loginUnconfirmed = sessionEnvironment.ok && signedIn === null;
+    const sessionReady = sessionEnvironment.ok && sessionEnvironment.stage === "SESSION_READY" && signedIn === true;
     result = finish({
       ok: sessionReady,
       sessionReady,
       status: sessionReady ? "SESSION_READY" : "SESSION_NOT_READY",
       message: sessionReady
-        ? "Amazon 会话已就绪：出口 US、页面状态 ok、配送地区 US、语言 en-US。"
-        : `Amazon 会话未就绪：${sessionEnvironment.errorMessage ?? "会话门禁未通过。"}`,
+        ? "Amazon 会话已就绪：已登录、出口 US、配送地区 US、语言 en-US。"
+        : loginUnconfirmed
+          ? "Amazon 环境已通过，但未能确认登录状态；请在专用浏览器确认已登录后重新检查。"
+          : `Amazon 会话未就绪：${sessionEnvironment.errorMessage ?? "会话门禁未通过。"}`,
       networkPreflight,
       exitCountry: preflight.exitCountry,
       exitCountryName: preflight.exitCountryName ?? null,
@@ -290,12 +298,13 @@ export async function checkAmazonSessionReadiness(input: {
       pageStatus: sessionEnvironment.pageStatus,
       delivery: sessionEnvironment.deliveryAfter,
       language: sessionEnvironment.language,
+      signedIn,
       calibrationAttempted: sessionEnvironment.calibrationAttempted,
-      failureStage: report.failureStage,
-      failureKind: report.failureKind,
+      failureStage: loginUnconfirmed ? "READ_PAGE_STATUS" : report.failureStage,
+      failureKind: loginUnconfirmed ? "UNKNOWN_SESSION_FAILURE" : report.failureKind,
       navigationElapsedMs: report.navigationElapsedMs,
       calibrationElapsedMs: report.calibrationElapsedMs,
-      errorCode: sessionEnvironment.errorCode,
+      errorCode: loginUnconfirmed ? "LOGIN_STATE_UNKNOWN" : sessionEnvironment.errorCode,
       errorName: report.errorName,
       errorDetail: report.errorDetail,
       elapsedMs: report.elapsedMs,

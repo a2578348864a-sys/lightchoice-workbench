@@ -298,6 +298,11 @@ export function shouldDisableFeishuSync(input: {
   return input.busy || !input.hasFormalReport || input.feishuConfigured === false;
 }
 
+/** 首次研报与重新生成共用同一个入口；无 reportHash 时也必须可生成。 */
+export function researchReportGenerationLabel(hasReportHash: boolean): string {
+  return hasReportHash ? "重新生成深度研报" : "生成深度研报";
+}
+
 function formatMoney(amount: number | null | undefined, currency = "$"): string {
   if (amount === null || amount === undefined || !Number.isFinite(amount)) return "— 未提供";
   return `${currency}${amount.toFixed(2)}`;
@@ -1763,12 +1768,10 @@ export function ResearchDetailClient({ taskId }: { taskId: string }) {
                 </details>
               </div>
 
-              {detail.reportHash ? (
-                <div className="lc-report-actions">
-                  <Button variant="secondary" size="sm" onClick={handleGenerateAdvisory} disabled={busy}>重新生成深度研报</Button>
-                  {detail.stale ? <span>先重新生成研报，再重新确认人工决策。</span> : null}
-                </div>
-              ) : null}
+              <div className="lc-report-actions">
+                <Button variant="secondary" size="sm" onClick={handleGenerateAdvisory} disabled={busy}>{researchReportGenerationLabel(Boolean(detail.reportHash))}</Button>
+                {detail.stale ? <span>先重新生成研报，再重新确认人工决策。</span> : null}
+              </div>
             </div>
           )}
         </ResearchMaterialDrawer>

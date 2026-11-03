@@ -31,6 +31,12 @@ export type AmazonCaptureFailureKind =
   | "login_required"
   | "human_confirmation"
   | "environment_unavailable"
+  | "market_locale"
+  | "marketplace_mismatch"
+  | "session_unavailable"
+  | "network_exit"
+  | "acquisition_disabled"
+  | "scope_disabled"
   | "page_changed"
   | "network"
   | "invalid_input"
@@ -48,31 +54,64 @@ const INPUT_ERROR_CODES = new Set([
 ]);
 
 const ENVIRONMENT_ERROR_CODES = new Set([
-  "LOCAL_ENVIRONMENT_REQUIRED",
   "PLAYWRIGHT_RUNTIME_MISSING",
   "BROWSER_NOT_FOUND",
   "AMAZON_CAPTURE_PROXY_INVALID",
+]);
+
+const NETWORK_ERROR_CODES = new Set([
+  "NETWORK_ERROR",
+  "CAPTURE_REQUEST_FAILED",
+  "PLAYWRIGHT_BROWSER_FAILED",
+  "TIMEOUT",
   "AMAZON_CAPTURE_PREFLIGHT_FAILED",
-  "AMAZON_US_SESSION_CALIBRATION_FAILED",
-  "MARKETPLACE_MISMATCH",
-  "LOCALE_MISMATCH",
+]);
+
+const NETWORK_EXIT_ERROR_CODES = new Set([
   "NON_US_EXIT",
   "AMAZON_CAPTURE_NON_US_EXIT",
 ]);
 
+const ACQUISITION_ERROR_CODES = new Set([
+  "LOCAL_ENVIRONMENT_REQUIRED",
+]);
+
+const SCOPE_ERROR_CODES = new Set([
+  "BATCH_CAPTURE_SCOPE_DISABLED",
+]);
+
+const SESSION_ERROR_CODES = new Set([
+  "AMAZON_US_SESSION_CALIBRATION_FAILED",
+]);
+
+const MARKET_LOCALE_ERROR_CODES = new Set([
+  "LOCALE_MISMATCH",
+]);
+
+const MARKETPLACE_ERROR_CODES = new Set([
+  "MARKETPLACE_MISMATCH",
+]);
+
 /**
  * 把服务端错误码归入用户语言的状态：
- * 需要登录授权 / 需要人工确认（验证码）/ 页面变化 / 网络失败 / 输入错误 / 其他。
+ * 需要登录授权 / 需要人工确认（验证码）/ 地区或币种不符 / 会话未就绪 /
+ * 网络出口 / 采集授权 / 批量范围 / 页面变化 / 网络失败 / 输入错误 / 其他。
+ * 不同故障不得合并成一个「采集环境不可用」。
  */
 export function classifyAmazonCaptureFailure(errorCode?: string | null): AmazonCaptureFailureKind {
   const code = (errorCode ?? "").toUpperCase();
   if (code === "LOGIN_REQUIRED" || code === "LOGIN_WALL" || code === "AUTH_REQUIRED") return "login_required";
   if (code === "CAPTCHA_DETECTED" || code === "HUMAN_REQUIRED" || code === "AUTOMATION_BLOCKED" || code === "RATE_LIMITED") return "human_confirmation";
+  if (MARKET_LOCALE_ERROR_CODES.has(code)) return "market_locale";
+  if (MARKETPLACE_ERROR_CODES.has(code)) return "marketplace_mismatch";
+  if (SESSION_ERROR_CODES.has(code)) return "session_unavailable";
+  if (NETWORK_EXIT_ERROR_CODES.has(code)) return "network_exit";
+  if (ACQUISITION_ERROR_CODES.has(code)) return "acquisition_disabled";
+  if (SCOPE_ERROR_CODES.has(code)) return "scope_disabled";
   if (code === "PAGE_CHANGED" || code === "PAGE_NOT_FOUND" || code === "CONTENT_REMOVED" || code === "CONTENT_DELETED" || code === "REVIEW_EXTRACTION_EMPTY" || code === "ASIN_PAGE_ANCHOR_MISMATCH") return "page_changed";
-  if (code === "NETWORK_ERROR" || code === "CAPTURE_REQUEST_FAILED" || code === "PLAYWRIGHT_BROWSER_FAILED" || code === "TIMEOUT") return "network";
+  if (NETWORK_ERROR_CODES.has(code) || code === "REVIEW_SOURCE_UNAVAILABLE") return "network";
   if (INPUT_ERROR_CODES.has(code)) return "invalid_input";
   if (ENVIRONMENT_ERROR_CODES.has(code)) return "environment_unavailable";
-  if (code === "REVIEW_SOURCE_UNAVAILABLE") return "network";
   // 采集浏览器被关闭 / Profile 被占用：可恢复，不是「未分类」。
   if (code === "BROWSER_CLOSED" || code === "TARGET_CLOSED" || code === "PROFILE_BUSY" || code === "PROFILE_IN_USE" || code === "AMAZON_CAPTURE_PROFILE_IN_USE") return "browser_closed";
   return "unknown";
@@ -94,7 +133,37 @@ export function amazonCaptureFailureGuidance(kind: AmazonCaptureFailureKind): { 
     case "environment_unavailable":
       return {
         title: "采集环境不可用",
-        hint: "当前浏览器、会话或本地采集配置未通过检查；系统没有改用未验证的数据源。修复环境后可以重试。",
+        hint: "当前浏览器或本地采集配置不可用；系统没有改用未验证的数据源。修复环境后可以重试。",
+      };
+    case "market_locale":
+      return {
+        title: "页面地区或币种不符",
+        hint: "Amazon 页面未确认是美国站价格（配送地区、语言或币种未通过核验）。系统已停止，未写入证据。请检查专用浏览器的配送地址与页面币种后重试；这不是登录问题。",
+      };
+    case "marketplace_mismatch":
+      return {
+        title: "不是美国站页面",
+        hint: "Amazon 把会话导向了非 amazon.com 页面，或页面缺少站点标识。系统已停止；请检查网络出口与专用浏览器页面后重试。",
+      };
+    case "session_unavailable":
+      return {
+        title: "Amazon 会话未就绪",
+        hint: "登录状态、页面状态、配送地区或语言未通过核验；系统未绕过登录或验证码。请在专用浏览器确认已登录且配送地区为美国，然后重新检查。",
+      };
+    case "network_exit":
+      return {
+        title: "网络出口不是美国",
+        hint: "当前出口不是美国，采集已禁用。请切换美国节点后重新检查；系统不会跨站点继续采集。",
+      };
+    case "acquisition_disabled":
+      return {
+        title: "采集未开放",
+        hint: "服务端未开启本地真实采集。请使用正式工作台启动配置，并确认采集授权后再试。",
+      };
+    case "scope_disabled":
+      return {
+        title: "批量采集未开放",
+        hint: "当前实例仅允许单 ASIN 采集（V5_ACQUISITION_SCOPE=single_asin_only），关键词批量采集被服务端安全策略关闭。系统没有把它伪装成登录失败，也没有放宽范围限制。",
       };
     case "page_changed":
       return {

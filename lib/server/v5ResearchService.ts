@@ -1459,6 +1459,8 @@ export async function listResearch(input: { context: AccessContext; view?: strin
     });
 
     const findingOfRow = researchFindingOf(root, state, researchState);
+    // 列表与详情共用同一份研报强度审查：待决策不能掩盖报告被暂停采信。
+    const claimAudit = await auditForState({ root, state, boundary });
 
     allRows.push({
       taskId: task.id,
@@ -1482,6 +1484,9 @@ export async function listResearch(input: { context: AccessContext; view?: strin
       myChoice: choiceProjection(state.myChoice),
       systemSuggestion: systemSuggestion(state),
       stale: (await researchReadStaleState(input.context, task.id, root, state)).stale,
+      reportAuditVerdict: claimAudit?.verdict ?? null,
+      reportConsumptionBlocked: Boolean(claimAudit && claimConsumptionBlockReason(claimAudit)),
+      reportConsumptionNotice: claimAudit ? claimConsumptionNotice(claimAudit) : null,
       hasProductBrief: isRecord(root.productBrief),
       archivedAt: task.archivedAt?.toISOString() ?? null,
       updatedAt: task.updatedAt.toISOString(),
